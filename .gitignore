@@ -1,0 +1,6 @@
+/target/
+/samples/
+/third_party/
+*.mp4
+*.ts
+*.flac

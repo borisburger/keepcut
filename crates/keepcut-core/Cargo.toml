@@ -1,0 +1,18 @@
+[package]
+name = "keepcut-core"
+description = "Media logic for Keepcut: probing, smart-cut planning and export via ffmpeg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
