@@ -45,7 +45,7 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,

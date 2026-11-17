@@ -1,0 +1,29 @@
+[package]
+name = "keepcut"
+description = "Keepcut: mark the parts of your clips to keep, then cut and join them losslessly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "keepcut"
+path = "src/main.rs"
+
+[dependencies]
+keepcut-core.workspace = true
+keepcut-player = { path = "../keepcut-player" }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.37"
+glow = "0.17"
+rfd = "0.18"
+serde.workspace = true
+serde_json.workspace = true
+toml = "1.2"
+directories = "6"
+uuid.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender = "0.2"
+png = "0.18"

@@ -845,6 +845,14 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
 - Cut preview and Preview all.
 - Export: **joined mode**, **Smart** encoding mode (smart cut, re-encode of mismatched clips with upscaling), **Full re-encode** mode with default settings (H.264, match-source quality, same resolution, keep timing, Auto encoder), audio pipeline (no loudness), progress/cancel, temp cleanup, verification, output folder default/browse/remember, naming rules.
 - **Done when** the author can do their Bandicam workflow end-to-end on Windows.
+- **Status (2026-11-18, first pass, `crates/keepcut`):** all items above implemented; awaiting the author's hands-on test.
+  - Layout per §8.1: toolbar (Add clips, Preview all, Undo/Redo, Export), clip list (enable checkbox, original → kept duration, resolution, audio-track count, "re-encode" badge with reasons, "can't read" badge, drag to reorder, context menu Remove / Show in folder, Sort by recording time; new clips are placed by recording time once probed), video (GL path with SW fallback; render path from config), editor (transport, I/O/S/Del, cut preview, timeline per §8.3, segment list with per-segment "keyframe: copied" / "re-encodes N s"), status bar (clips, kept total, target format, re-encode count, probing, render path/hwdec).
+  - Segment editing logic is in `keepcut-core/src/edit.rs`, undo in `history.rs` (snapshot of the clip list, cap 200; a drag is one step). Edge drags snap to frames (Shift: keyframes) and keep ≥ 1 frame per segment.
+  - Export dialog (§8.6) with the live plan summary; progress window (bar, step, elapsed/ETA, Cancel, log); finish window (verification per output, Show in folder, Play, Copy log, "Re-export with Full re-encode" when Smart verification fails). **Per-clip and per-segment modes are already exposed** since `keepcut-core` supports them (Phase 2 item done early).
+  - Config `<config dir>/config.toml` (output location + remembered custom folder, encoding and output mode, render path); logs `<data dir>/logs/keepcut.YYYY-MM-DD.log`, 7 days.
+  - **Test automation:** `keepcut --script FILE [CLIPS…]` runs commands through the same code paths as the UI (select, seek, step, set-start, split, trim, undo, previews, export, cancel, print-state, screenshot of the app's own frame). Scripted runs never save the config. Verified overnight: edits/undo/redo, previews with time mapping, trims with keyframe snapping, an unreadable file, Smart and Full joined exports of the edited Bandicam set (60.933 s exact, A−V 0, 885/885 frames), cancel (no partial output).
+  - egui's default proportional font lacks ⚠ ✕ ✓ → ▶ ◀; UI strings avoid them (the monospace font has →).
+  - Not yet: thumbnails, project save/open, autosave (Phase 3); frame step during a preview uses mpv's own stepping.
 
 ### Phase 2 — Export completeness
 - Per-clip and per-segment export modes.

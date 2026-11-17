@@ -13,8 +13,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod player;
-mod render;
+use keepcut_player::{player, render};
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};

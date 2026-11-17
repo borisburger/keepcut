@@ -3,10 +3,12 @@
 
 pub mod chapters;
 pub mod compat;
+pub mod edit;
 pub mod encoders;
 pub mod error;
 pub mod exec;
 pub mod ffmpeg;
+pub mod history;
 pub mod model;
 pub mod plan;
 pub mod probe;

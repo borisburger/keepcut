@@ -1,6 +1,6 @@
 [package]
 name = "keepcut-player"
-description = "Phase 0B player spike: libmpv rendering inside eframe/egui (glow)"
+description = "libmpv playback inside eframe/egui (glow), plus the Phase 0B player spike binary"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

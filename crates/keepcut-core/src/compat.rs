@@ -53,7 +53,7 @@ impl Signature {
             let up = (self.width as u64 * self.height as u64)
                 < (target.width as u64 * target.height as u64);
             r.push(format!(
-                "{}×{} vs {}×{} → will be re-encoded and scaled {}",
+                "{}×{} vs {}×{}: will be re-encoded and scaled {}",
                 self.width,
                 self.height,
                 target.width,
