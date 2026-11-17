@@ -853,6 +853,17 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
   - **Test automation:** `keepcut --script FILE [CLIPS…]` runs commands through the same code paths as the UI (select, seek, step, set-start, split, trim, undo, previews, export, cancel, print-state, screenshot of the app's own frame). Scripted runs never save the config. Verified overnight: edits/undo/redo, previews with time mapping, trims with keyframe snapping, an unreadable file, Smart and Full joined exports of the edited Bandicam set (60.933 s exact, A−V 0, 885/885 frames), cancel (no partial output).
   - egui's default proportional font lacks ⚠ ✕ ✓ → ▶ ◀; UI strings avoid them (the monospace font has →).
   - Not yet: thumbnails, project save/open, autosave (Phase 3); frame step during a preview uses mpv's own stepping.
+  - **Review fixes (independent code review, 2026-11-18):**
+    - Probe results are cached per *file path* (not per clip). Removing, undoing or redoing a clip can no longer leave a clip stuck "reading…" or block Export.
+    - Unprobed clips hold `segments: None` ("whole clip"), filled in on probe and after undo/redo. Undo can't empty clips any more.
+    - Adding files is one undo step.
+    - The enable checkbox sits outside the draggable card (inside it, egui gave the click to the card).
+    - Timeline zoom uses `zoom_delta` (egui turns Ctrl+wheel into zoom). Edge grabs hit-test at `press_origin`; at a split point the pointer side picks the edge.
+    - "Preview all" selects the clip that is playing, so I/O/S edit the right clip at the right time; edits and leaving a preview keep the position.
+    - Steps and keyframe jumps compute from a pending seek's target. Seeks clamp at 0. Re-selecting the current clip and finished probes no longer reset the playhead.
+    - Shortcuts are blocked while dragging; a drag records its own clip.
+    - Export: a crashed export thread ends with an error instead of hanging; closing the window cancels a running export and waits up to 5 s for cleanup.
+    - The joined file name follows the first clip until edited. "Custom" without a folder blocks Export. The config is saved once, not per keystroke.
 
 ### Phase 2 — Export completeness
 - Per-clip and per-segment export modes.

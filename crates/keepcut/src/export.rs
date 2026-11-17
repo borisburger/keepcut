@@ -22,6 +22,8 @@ pub struct ExportUi {
     dialog: bool,
     /// Joined-mode file name (without folder).
     name: String,
+    /// The user typed a name; otherwise it follows the first clip.
+    name_edited: bool,
     job: Option<Job>,
     finished: Option<Finished>,
 }
@@ -58,17 +60,23 @@ impl App {
         }
         self.export.finished = None;
         self.apply_output_settings();
-        // default joined name = the planner's default for the first clip
-        self.export.name = match self.build_plan() {
-            Some(Ok(p)) if self.project.export.output_name.is_none() => p
-                .outputs
-                .first()
-                .and_then(|o| o.path.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            _ => self.project.export.output_name.clone().unwrap_or_default(),
+        self.export.name_edited = self.project.export.output_name.is_some();
+        self.export.name = match &self.project.export.output_name {
+            Some(n) => n.clone(),
+            None => self.default_joined_name(),
         };
         self.export.dialog = true;
+    }
+
+    /// `<first enabled, readable clip> - joined.mp4` (the planner's default, §6.12).
+    fn default_joined_name(&self) -> String {
+        self.project
+            .clips
+            .iter()
+            .find(|c| c.enabled && self.info(c.id).is_some())
+            .and_then(|c| c.path.file_stem())
+            .map(|s| format!("{} - joined.mp4", s.to_string_lossy()))
+            .unwrap_or_default()
     }
 
     /// Copies the output location from the config into the project settings.
@@ -82,7 +90,15 @@ impl App {
 
     pub fn poll_export(&mut self) {
         let Some(job) = &self.export.job else { return };
-        if let Ok(result) = job.rx.try_recv() {
+        let result = match job.rx.try_recv() {
+            Ok(r) => Some(r),
+            // the export thread died without reporting (a panic): don't hang the UI
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("the export stopped unexpectedly (see the log)".into()))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        };
+        if let Some(result) = result {
             let log = job.log.lock().unwrap().clone();
             self.export.finished = Some(Finished {
                 result,
@@ -144,7 +160,13 @@ impl App {
 
                 if self.project.export.output_mode == OutputMode::Joined {
                     ui.label("File name");
-                    changed |= ui.add(egui::TextEdit::singleline(&mut self.export.name).desired_width(400.0)).changed();
+                    if !self.export.name_edited {
+                        self.export.name = self.default_joined_name();
+                    }
+                    if ui.add(egui::TextEdit::singleline(&mut self.export.name).desired_width(400.0)).changed() {
+                        self.export.name_edited = true;
+                        changed = true;
+                    }
                     ui.end_row();
                 }
 
@@ -209,8 +231,12 @@ impl App {
                     ui.weak("Add clips first.");
                 }
             }
-            let unreadable = self.media.values().filter(|m| m.error.is_some()).count();
-            let pending = self.media.values().filter(|m| m.info.is_none() && m.error.is_none()).count();
+            let unreadable = self.unreadable_count();
+            let pending = self.pending_count();
+            let no_folder = self.config.output_location == OutputLocation::Custom && self.config.custom_output_dir.is_none();
+            if no_folder {
+                ui.colored_label(ui.visuals().warn_fg_color, "Choose a custom folder (Browse…) or use the source folder");
+            }
             if unreadable > 0 {
                 ui.colored_label(ui.visuals().warn_fg_color, format!("{unreadable} clip(s) can't be read and are left out"));
             }
@@ -220,7 +246,7 @@ impl App {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let ok = matches!(self.plan, Some(Ok(_))) && pending == 0;
+                let ok = matches!(self.plan, Some(Ok(_))) && pending == 0 && !no_folder;
                 if ui.add_enabled(ok, egui::Button::new(RichText::new("Export").strong())).clicked() {
                     start = true;
                 }
@@ -230,21 +256,23 @@ impl App {
             });
         });
         if changed {
-            self.project.export.output_name = (self.project.export.output_mode
-                == OutputMode::Joined)
-                .then(|| self.export.name.trim().to_string())
-                .filter(|n| !n.is_empty())
-                .map(|n| {
-                    if n.to_lowercase().ends_with(".mp4") {
-                        n
-                    } else {
-                        format!("{n}.mp4")
-                    }
-                });
+            // only a name the user typed is kept; otherwise the default follows the clips
+            self.project.export.output_name =
+                (self.project.export.output_mode == OutputMode::Joined && self.export.name_edited)
+                    .then(|| self.export.name.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .map(|n| {
+                        if n.to_lowercase().ends_with(".mp4") {
+                            n
+                        } else {
+                            format!("{n}.mp4")
+                        }
+                    });
             self.apply_output_settings();
-            if self.script.is_none() {
-                self.config.save();
-            }
+        }
+        if (modal.should_close() || close || start) && self.script.is_none() {
+            // remember the folder choice (once, not on every keystroke)
+            self.config.save();
         }
         if modal.should_close() || close {
             self.export.dialog = false;
@@ -258,6 +286,15 @@ impl App {
     pub fn start_export_from_script(&mut self) {
         self.export.dialog = false;
         self.start_export();
+    }
+
+    /// On exit: cancel a running export and give it a moment to kill ffmpeg and
+    /// remove its temporary and partial files.
+    pub fn cancel_export_and_wait(&mut self) {
+        if let Some(j) = self.export.job.take() {
+            j.cancel.cancel();
+            let _ = j.rx.recv_timeout(Duration::from_secs(5));
+        }
     }
 
     pub fn cancel_export(&mut self) {
@@ -526,7 +563,10 @@ pub fn reveal(path: &Path) {
     }
     #[cfg(not(windows))]
     {
-        let dir = path.parent().map(PathBuf::from).unwrap_or_default();
+        let dir = path
+            .parent()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
         let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
     }
 }

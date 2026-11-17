@@ -5,7 +5,7 @@ use eframe::egui::{self, RichText};
 use keepcut_core::{edit, timefmt};
 use uuid::Uuid;
 
-use crate::app::App;
+use crate::app::{App, ProbeState};
 
 impl App {
     pub fn clip_list(&mut self, ui: &mut egui::Ui) {
@@ -46,54 +46,60 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for (i, c) in clips.iter().enumerate() {
                 let selected = self.selected == Some(c.id);
-                let m = self.media.get(&c.id);
+                let probe = self.probe_state(c.id).cloned();
                 let name = c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let item_id = egui::Id::unique(("clip", c.id));
-                let row = ui.dnd_drag_source(item_id, i, |ui| {
-                    let frame = egui::Frame::group(ui.style())
-                        .fill(if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.5) } else { ui.visuals().faint_bg_color })
-                        .inner_margin(6.0);
-                    frame.show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            let mut en = c.enabled;
-                            if ui.checkbox(&mut en, "").on_hover_text("Include in the export").changed() {
-                                toggle = Some(c.id);
-                            }
+                // The checkbox sits outside the draggable card: inside it, the
+                // card's drag/click sense would win and the checkbox couldn't be clicked.
+                let row = ui.horizontal(|ui| {
+                    let mut en = c.enabled;
+                    if ui.checkbox(&mut en, "").on_hover_text("Include in the export").changed() {
+                        toggle = Some(c.id);
+                    }
+                    ui.dnd_drag_source(item_id, i, |ui| {
+                        let fill = if selected {
+                            ui.visuals().selection.bg_fill.gamma_multiply(0.5)
+                        } else {
+                            ui.visuals().faint_bg_color
+                        };
+                        egui::Frame::group(ui.style()).fill(fill).inner_margin(6.0).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
                             let text = if c.enabled { RichText::new(&name) } else { RichText::new(&name).weak().strikethrough() };
                             ui.label(text.strong()).on_hover_text(c.path.display().to_string());
-                        });
-                        ui.horizontal(|ui| match m {
-                            Some(m) if m.info.is_some() => {
-                                let info = m.info.as_ref().unwrap();
-                                let kept = edit::kept_duration(c.segments.as_deref().unwrap_or(&[]));
-                                ui.monospace(format!("{} → {}", timefmt::display(info.video_end()), timefmt::display(kept)));
-                                if let Some(v) = &info.video {
-                                    ui.weak(format!("{}×{}", v.width, v.height));
+                            ui.horizontal(|ui| match &probe {
+                                Some(ProbeState::Ready(info)) => {
+                                    let kept = edit::kept_duration(c.segments.as_deref().unwrap_or(&[]));
+                                    ui.monospace(format!("{} → {}", timefmt::display(info.video_end()), timefmt::display(kept)));
+                                    if let Some(v) = &info.video {
+                                        ui.weak(format!("{}×{}", v.width, v.height));
+                                    }
+                                    if info.audio.len() > 1 {
+                                        ui.weak(format!("{} audio", info.audio.len()))
+                                            .on_hover_text("Audio tracks are mixed in the export");
+                                    }
+                                    if let Some((_, ok, reasons)) = verdicts.iter().find(|(id, _, _)| *id == c.id)
+                                        && !ok
+                                    {
+                                        ui.colored_label(ui.visuals().warn_fg_color, "re-encode").on_hover_text(format!(
+                                            "Can't be copied into the joined file:\n{}",
+                                            reasons.join("\n")
+                                        ));
+                                    }
                                 }
-                                if info.audio.len() > 1 {
-                                    ui.weak(format!("{} audio", info.audio.len())).on_hover_text("Audio tracks are mixed in the export");
+                                Some(ProbeState::Failed(e)) => {
+                                    ui.colored_label(ui.visuals().error_fg_color, "can't read").on_hover_text(e.clone());
                                 }
-                                if let Some((_, ok, reasons)) = verdicts.iter().find(|(id, _, _)| *id == c.id)
-                                    && !ok
-                                {
-                                    ui.colored_label(ui.visuals().warn_fg_color, "re-encode")
-                                        .on_hover_text(format!("Can't be copied into the joined file:\n{}", reasons.join("\n")));
+                                _ => {
+                                    ui.spinner();
+                                    ui.weak("reading…");
                                 }
-                            }
-                            Some(m) if m.error.is_some() => {
-                                ui.colored_label(ui.visuals().error_fg_color, "can't read")
-                                    .on_hover_text(m.error.clone().unwrap_or_default());
-                            }
-                            _ => {
-                                ui.spinner();
-                                ui.weak("reading…");
-                            }
-                        });
+                            });
+                        })
+                        .response
                     })
                     .response
                 });
-                let resp = row.response.interact(egui::Sense::click());
+                let resp = row.inner.interact(egui::Sense::click());
                 if resp.clicked() {
                     select = Some(c.id);
                 }
@@ -107,13 +113,15 @@ impl App {
                         ui.close();
                     }
                 });
-                // drop target: dropping a dragged clip on this row moves it here
+                // drop target: dropping a dragged clip on this row moves it to this position
                 if let Some(from) = resp.dnd_release_payload::<usize>() {
                     moved = Some((*from, i));
                 }
-                if resp.dnd_hover_payload::<usize>().is_some() {
+                if let Some(from) = resp.dnd_hover_payload::<usize>() {
+                    // moving down lands after this row, moving up before it
                     let r = resp.rect;
-                    ui.painter().hline(r.x_range(), r.top() - 2.0, egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
+                    let y = if *from < i { r.bottom() + 2.0 } else { r.top() - 2.0 };
+                    ui.painter().hline(r.x_range(), y, egui::Stroke::new(2.0, ui.visuals().selection.stroke.color));
                 }
                 ui.add_space(2.0);
             }

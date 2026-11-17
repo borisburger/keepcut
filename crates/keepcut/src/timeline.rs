@@ -28,9 +28,17 @@ impl App {
             return;
         };
         let Some(info) = self.info(id) else {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("reading clip…");
+            ui.horizontal(|ui| match self.probe_error(id) {
+                Some(e) => {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("This file can't be read: {e}"),
+                    );
+                }
+                None => {
+                    ui.spinner();
+                    ui.label("reading clip…");
+                }
             });
             ui.allocate_space(vec2(ui.available_width(), 40.0));
             return;
@@ -130,8 +138,10 @@ impl App {
                     [pos2(x, rect.top()), pos2(x, rect.bottom())],
                     Stroke::new(2.0, vis.strong_text_color()),
                 );
+                // keep the time label inside the widget near the ends
+                let lx = x.clamp(rect.left() + 28.0, rect.right() - 28.0);
                 painter.text(
-                    pos2(x, rect.top()),
+                    pos2(lx, rect.top()),
                     egui::Align2::CENTER_TOP,
                     timefmt::display(t),
                     egui::FontId::monospace(10.0),
@@ -161,9 +171,17 @@ impl App {
             let mut best: Option<(usize, Edge, f32)> = None;
             for (i, s) in segs.iter().enumerate() {
                 for (edge, t) in [(Edge::Start, s.start), (Edge::End, s.end)] {
-                    let d = (x_of(t) - p.x).abs();
-                    if d <= EDGE_GRAB_PX && best.is_none_or(|b| d < b.2) {
-                        best = Some((i, edge, d));
+                    let x = x_of(t);
+                    let d = (x - p.x).abs();
+                    // where two edges meet (a split point), the pointer side decides:
+                    // left of it grabs the End of the left segment, right of it the Start
+                    let wrong_side = match edge {
+                        Edge::Start => p.x < x,
+                        Edge::End => p.x > x,
+                    };
+                    let score = d + if wrong_side { 0.5 } else { 0.0 };
+                    if d <= EDGE_GRAB_PX && best.is_none_or(|b| score < b.2) {
+                        best = Some((i, edge, score));
                     }
                 }
             }
@@ -188,15 +206,15 @@ impl App {
                 };
                 resp.clone().on_hover_text(tip);
             }
-            // zoom (Ctrl+wheel around the cursor) and pan (wheel)
-            let (scroll, zoom_mod) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.command));
+            // zoom (Ctrl+wheel or pinch: egui reports it as zoom_delta) and pan (wheel)
+            let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
             let delta = if scroll.y != 0.0 { scroll.y } else { scroll.x };
-            if delta != 0.0 {
+            if zoom != 1.0 || delta != 0.0 {
                 let span = v1 - v0;
-                if zoom_mod {
-                    let factor = (1.0 - delta as f64 * 0.003).clamp(0.5, 2.0);
+                if zoom != 1.0 {
+                    let factor = (1.0 / zoom as f64).clamp(0.5, 2.0);
                     let anchor = t_of(p.x);
-                    let new_span = (span * factor).clamp(0.5, dur);
+                    let new_span = (span * factor).clamp(0.5_f64.min(dur), dur);
                     let mut s0 = anchor - (anchor - v0) * new_span / span;
                     s0 = s0.clamp(0.0, (dur - new_span).max(0.0));
                     self.timeline = if new_span >= dur - 1e-6 {
@@ -219,12 +237,17 @@ impl App {
         }
 
         // start of a drag: an edge grabs it, otherwise scrub
+        // (hit-test where the button went down: drag_started fires only after
+        // the pointer has moved a few pixels)
         if resp.drag_started()
-            && let Some(p) = resp.interact_pointer_pos()
+            && let Some(p) = ui
+                .input(|i| i.pointer.press_origin())
+                .or(resp.interact_pointer_pos())
             && let Some((i, edge)) = hover_edge(p)
         {
             self.selected_seg = Some(segs[i].id);
             self.drag = Some(Drag {
+                clip: id,
                 seg: segs[i].id,
                 edge,
                 before: self.project.clips.clone(),
@@ -237,8 +260,10 @@ impl App {
             let shift = ui.input(|i| i.modifiers.shift);
             let raw = t_of(p.x);
             if let Some(d) = &self.drag {
-                let (seg_id, edge) = (d.seg, d.edge);
-                self.trim_edge(id, seg_id, edge, raw, shift);
+                if d.clip == id {
+                    let (seg_id, edge) = (d.seg, d.edge);
+                    self.trim_edge(id, seg_id, edge, raw, shift);
+                }
             } else {
                 let t = fi.snap(raw);
                 if resp.clicked()
@@ -256,9 +281,9 @@ impl App {
             let changed = d
                 .before
                 .iter()
-                .find(|c| c.id == id)
+                .find(|c| c.id == d.clip)
                 .map(|c| c.segments.clone())
-                != Some(self.clip(id).and_then(|c| c.segments.clone()));
+                != Some(self.clip(d.clip).and_then(|c| c.segments.clone()));
             if changed {
                 self.history.push(d.before);
                 self.mark_plan_dirty();

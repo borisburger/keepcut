@@ -28,13 +28,13 @@ pub enum Renderer {
     Sw(SwRenderer),
 }
 
-/// Probe state of one clip.
-#[derive(Default)]
-pub struct ClipMedia {
-    pub info: Option<Arc<MediaInfo>>,
-    pub error: Option<String>,
-    /// Playhead to restore when the clip is selected again.
-    pub last_pos: f64,
+/// Probe state of a source file. Kept per *path* (not per clip), so removing,
+/// undoing or redoing a clip never loses or strands a probe result.
+#[derive(Clone)]
+pub enum ProbeState {
+    Pending,
+    Ready(Arc<MediaInfo>),
+    Failed(String),
 }
 
 /// One kept range in an EDL preview: `len` seconds of `clip`/`seg` starting at
@@ -68,6 +68,7 @@ pub enum Edge {
 
 /// A segment edge being dragged on the timeline (one undo step on release).
 pub struct Drag {
+    pub clip: Uuid,
     pub seg: Uuid,
     pub edge: Edge,
     pub before: Vec<Clip>,
@@ -81,7 +82,9 @@ pub struct App {
     pub tools: Option<Tools>,
     pub config: Config,
     pub project: Project,
-    pub media: HashMap<Uuid, ClipMedia>,
+    pub probes: HashMap<PathBuf, ProbeState>,
+    /// Playhead to restore when a clip is selected again.
+    pub last_pos: HashMap<Uuid, f64>,
     pub probe: ProbeService,
     pub encoders: EncoderSet,
     encoders_rx: Option<Receiver<EncoderSet>>,
@@ -100,6 +103,9 @@ pub struct App {
     /// A fast frame step (speed 32) is in flight.
     fast_step: Option<Instant>,
     pending_seek: Option<f64>,
+    /// Target of the last seek until mpv reports playback-restart.
+    seek_target: Option<f64>,
+    seek_target_age: u32,
     /// Test automation (`--script`).
     pub script: Option<crate::script::Script>,
 }
@@ -150,7 +156,8 @@ impl App {
             tools,
             config,
             project,
-            media: HashMap::new(),
+            probes: HashMap::new(),
+            last_pos: HashMap::new(),
             probe,
             encoders: EncoderSet::software_only(),
             encoders_rx,
@@ -167,6 +174,8 @@ impl App {
             status_at: Instant::now(),
             fast_step: None,
             pending_seek: None,
+            seek_target: None,
+            seek_target_age: 0,
             script: None,
         };
         if app.tools.is_none() {
@@ -185,30 +194,35 @@ impl App {
     // Clips and edits
     // ------------------------------------------------------------------
 
+    /// Adds files as clips (one undo step for the whole batch).
     pub fn add_files(&mut self, files: Vec<PathBuf>) {
+        let before = self.project.clips.clone();
         let mut added = 0;
         for f in files {
             let f = std::path::absolute(&f).unwrap_or(f);
             if !f.is_file() || self.project.clips.iter().any(|c| c.path == f) {
                 continue;
             }
-            let clip = Clip {
+            self.project.clips.push(Clip {
                 id: Uuid::new_v4(),
                 path: f.clone(),
                 file_size: 0,
                 file_mtime: 0,
                 enabled: true,
-                segments: Some(Vec::new()), // filled with the whole clip once probed
+                // None = "the whole clip"; becomes one real segment once probed
+                segments: None,
                 chapter_title: None,
-            };
-            let before = self.project.clips.clone();
-            self.media.insert(clip.id, ClipMedia::default());
-            self.project.clips.push(clip);
-            self.history.push(before);
-            self.probe.enqueue(f);
+            });
+            if !self.probes.contains_key(&f) {
+                self.probes.insert(f.clone(), ProbeState::Pending);
+                self.probe.enqueue(f.clone());
+            }
+            self.sort_new_clip(&f);
             added += 1;
         }
         if added > 0 {
+            self.history.push(before);
+            self.fill_whole_clip_segments();
             self.plan_dirty = true;
             if self.selected.is_none() {
                 self.select_clip(self.project.clips.first().map(|c| c.id));
@@ -217,39 +231,58 @@ impl App {
     }
 
     fn on_probed(&mut self, path: PathBuf, r: Result<Arc<MediaInfo>, String>) {
-        let ids: Vec<Uuid> = self
-            .project
-            .clips
-            .iter()
-            .filter(|c| c.path == path)
-            .map(|c| c.id)
-            .collect();
-        for id in ids {
-            let m = self.media.entry(id).or_default();
-            match &r {
-                Ok(info) => {
-                    m.info = Some(info.clone());
-                    m.error = None;
-                    if let Some(c) = self.project.clips.iter_mut().find(|c| c.id == id) {
-                        c.file_size = info.file_size;
-                        c.file_mtime = info.file_mtime;
-                        // a new clip gets one segment covering the whole clip
-                        if c.segments.as_ref().is_none_or(Vec::is_empty) {
-                            c.segments = Some(vec![Segment::new(0.0, info.video_end())]);
-                        }
-                    }
-                }
-                Err(e) => m.error = Some(e.clone()),
-            }
-        }
+        self.probes.insert(
+            path.clone(),
+            match r {
+                Ok(info) => ProbeState::Ready(info),
+                Err(e) => ProbeState::Failed(e),
+            },
+        );
+        self.fill_whole_clip_segments();
         self.sort_new_clip(&path);
         self.plan_dirty = true;
-        if self
-            .selected
-            .is_some_and(|s| self.clip(s).is_some_and(|c| c.path == path))
-        {
-            self.reload_selected();
+    }
+
+    /// Clips whose segments are `None` ("whole clip", e.g. not yet probed when
+    /// added, or restored by undo) get one real segment once their file is probed.
+    fn fill_whole_clip_segments(&mut self) {
+        for c in &mut self.project.clips {
+            if let Some(ProbeState::Ready(info)) = self.probes.get(&c.path) {
+                c.file_size = info.file_size;
+                c.file_mtime = info.file_mtime;
+                if c.segments.is_none() {
+                    c.segments = Some(vec![Segment::new(0.0, info.video_end())]);
+                }
+            }
         }
+    }
+
+    pub fn probe_state(&self, id: Uuid) -> Option<&ProbeState> {
+        self.probes.get(&self.clip(id)?.path)
+    }
+
+    pub fn probe_error(&self, id: Uuid) -> Option<String> {
+        match self.probe_state(id)? {
+            ProbeState::Failed(e) => Some(e.clone()),
+            _ => None,
+        }
+    }
+
+    /// Clips of the project whose files are still being read.
+    pub fn pending_count(&self) -> usize {
+        self.project
+            .clips
+            .iter()
+            .filter(|c| matches!(self.probes.get(&c.path), Some(ProbeState::Pending) | None))
+            .count()
+    }
+
+    pub fn unreadable_count(&self) -> usize {
+        self.project
+            .clips
+            .iter()
+            .filter(|c| matches!(self.probes.get(&c.path), Some(ProbeState::Failed(_))))
+            .count()
     }
 
     /// New clips are placed by recording time once their metadata is known.
@@ -274,11 +307,7 @@ impl App {
     }
 
     pub fn recording_time(&self, id: Uuid) -> Option<f64> {
-        self.media
-            .get(&id)?
-            .info
-            .as_ref()
-            .map(|i| i.recording_time())
+        self.info(id).map(|i| i.recording_time())
     }
 
     pub fn sort_by_recording_time(&mut self) {
@@ -301,7 +330,10 @@ impl App {
     }
 
     pub fn info(&self, id: Uuid) -> Option<Arc<MediaInfo>> {
-        self.media.get(&id)?.info.clone()
+        match self.probe_state(id)? {
+            ProbeState::Ready(i) => Some(i.clone()),
+            _ => None,
+        }
     }
 
     pub fn segments(&self, id: Uuid) -> &[Segment] {
@@ -348,9 +380,9 @@ impl App {
 
     fn after_edit(&mut self) {
         self.plan_dirty = true;
-        // an edited clip invalidates a running cut preview of it
+        // an edit invalidates a running preview: leave it where it was playing
         if matches!(self.loaded, Loaded::Preview { .. }) {
-            self.reload_selected();
+            self.leave_preview();
         }
     }
 
@@ -369,7 +401,9 @@ impl App {
     }
 
     fn after_undo_redo(&mut self) {
-        if self.selected.is_some_and(|s| self.clip(s).is_none()) {
+        // snapshots may hold "whole clip" (None) segments of clips probed since
+        self.fill_whole_clip_segments();
+        if self.selected.is_none_or(|s| self.clip(s).is_none()) {
             self.select_clip(self.project.clips.first().map(|c| c.id));
         }
         if let Some(s) = self.selected_seg
@@ -397,7 +431,9 @@ impl App {
     // Player
     // ------------------------------------------------------------------
 
-    /// Current position in source time of the selected clip.
+    /// Current position in source time of the selected clip. During a preview
+    /// this maps the preview time back (Preview all keeps the selection on the
+    /// clip that is playing, see `follow_preview`).
     pub fn source_time(&self) -> f64 {
         let t = self.player.state.time_pos;
         match &self.loaded {
@@ -423,13 +459,27 @@ impl App {
         ))
     }
 
-    pub fn select_clip(&mut self, id: Option<Uuid>) {
-        if let Some(cur) = self.selected
-            && let Some(m) = self.media.get_mut(&cur)
-            && matches!(self.loaded, Loaded::Clip(c) if c == cur)
+    /// In "Preview all", select the clip that is currently playing, so edits
+    /// and the timeline refer to it.
+    fn follow_preview(&mut self) {
+        if let Loaded::Preview { clip: None, .. } = self.loaded
+            && let Some((clip, seg, _)) = self.preview_to_source(self.player.state.time_pos)
+            && self.selected != Some(clip)
         {
-            m.last_pos = self.player.state.time_pos;
+            self.selected = Some(clip);
+            self.selected_seg = Some(seg);
+            self.timeline = TimelineView::default();
         }
+    }
+
+    pub fn select_clip(&mut self, id: Option<Uuid>) {
+        if id.is_some()
+            && self.selected == id
+            && matches!(self.loaded, Loaded::Clip(c) if Some(c) == id)
+        {
+            return; // already showing it: keep the playhead
+        }
+        self.remember_position();
         if self.selected != id {
             self.selected_seg = None;
             self.timeline = TimelineView::default();
@@ -438,8 +488,33 @@ impl App {
         self.reload_selected();
     }
 
+    /// Stores the playhead of the selected clip (also from inside a preview).
+    fn remember_position(&mut self) {
+        let Some(cur) = self.selected else { return };
+        let pos = match &self.loaded {
+            Loaded::Clip(c) if *c == cur => Some(self.player.state.time_pos),
+            Loaded::Preview { .. } => self
+                .preview_to_source(self.player.state.time_pos)
+                .filter(|(c, _, _)| *c == cur)
+                .map(|(_, _, t)| t),
+            _ => None,
+        };
+        if let Some(p) = pos {
+            self.last_pos.insert(cur, p.max(0.0));
+        }
+    }
+
+    fn cancel_fast_step(&mut self) {
+        if self.fast_step.take().is_some() {
+            self.player.command("set", &["speed", "1"]);
+        }
+    }
+
     /// Loads the selected clip into mpv (keeping its last playhead).
     pub fn reload_selected(&mut self) {
+        self.cancel_fast_step();
+        self.pending_seek = None;
+        self.seek_target = None;
         let Some(id) = self.selected else {
             self.player.command("stop", &[]);
             self.loaded = Loaded::Nothing;
@@ -447,16 +522,20 @@ impl App {
         };
         let Some(c) = self.clip(id) else { return };
         let path = c.path.to_string_lossy().into_owned();
-        let pos = self.media.get(&id).map_or(0.0, |m| m.last_pos);
+        let pos = self.last_pos.get(&id).copied().unwrap_or(0.0).max(0.0);
         self.player.command(
             "loadfile",
             &[&path, "replace", "-1", &format!("start={pos:.6}")],
         );
         self.player.command("set", &["pause", "yes"]);
+        // until mpv reports on the new file, don't keep the previous file's position
+        self.player.state.time_pos = pos;
         self.loaded = Loaded::Clip(id);
     }
 
     fn load_preview(&mut self, clip: Option<Uuid>) {
+        self.cancel_fast_step();
+        self.remember_position();
         let clips: Vec<&Clip> = match clip {
             Some(id) => self.clip(id).into_iter().collect(),
             None => self.project.clips.iter().filter(|c| c.enabled).collect(),
@@ -487,46 +566,62 @@ impl App {
         }
         self.player.load(&player::edl_url(&items));
         self.player.command("set", &["pause", "no"]);
+        self.player.state.time_pos = 0.0;
         self.loaded = Loaded::Preview { clip, spans };
+    }
+
+    /// Leaves a preview, landing on the selected clip where the preview was.
+    fn leave_preview(&mut self) {
+        self.remember_position();
+        self.reload_selected();
     }
 
     pub fn toggle_cut_preview(&mut self) {
         match &self.loaded {
-            Loaded::Preview { .. } => self.reload_selected(),
+            Loaded::Preview { .. } => self.leave_preview(),
             _ => self.load_preview(self.selected),
         }
     }
 
     pub fn toggle_preview_all(&mut self) {
         match &self.loaded {
-            Loaded::Preview { clip: None, .. } => self.reload_selected(),
+            Loaded::Preview { clip: None, .. } => self.leave_preview(),
             _ => self.load_preview(None),
         }
     }
 
     /// Seeks to a source time of the selected clip (leaving any preview).
     pub fn seek(&mut self, t: f64) {
+        let t = t.max(0.0);
         if matches!(self.loaded, Loaded::Preview { .. }) {
-            if let Some(id) = self.selected
-                && let Some(m) = self.media.get_mut(&id)
-            {
-                m.last_pos = t;
+            if let Some(id) = self.selected {
+                self.last_pos.insert(id, t);
             }
             self.reload_selected();
             return;
         }
-        self.pending_seek = Some(t.max(0.0));
+        self.pending_seek = Some(t);
     }
 
     fn flush_seek(&mut self) {
         // coalesce: one seek per UI frame while dragging
         if let Some(t) = self.pending_seek.take() {
             self.player.seek_exact(t);
+            self.seek_target = Some(t);
+            self.seek_target_age = 0;
         }
     }
 
+    /// Where the playhead is, or will be once a pending/in-flight seek lands.
+    fn effective_time(&self) -> f64 {
+        self.pending_seek
+            .or(self.seek_target)
+            .unwrap_or_else(|| self.source_time())
+    }
+
     /// Frame step (§3.5): forward plays the step at speed 32; backward seeks
-    /// exactly to the previous frame from the frame index.
+    /// exactly to the previous frame from the frame index. While a seek is
+    /// still landing, steps are computed from its target instead.
     pub fn step(&mut self, forward: bool) {
         if matches!(self.loaded, Loaded::Preview { .. }) {
             self.player.command(
@@ -539,19 +634,27 @@ impl App {
             );
             return;
         }
-        let t = self.player.state.time_pos;
-        if forward {
-            self.player.command("set", &["speed", "32"]);
-            self.player.command("frame-step", &[]);
-            self.fast_step = Some(Instant::now());
-        } else if let Some(p) = self
-            .selected
-            .and_then(|id| self.info(id))
-            .and_then(|i| i.frames.prev_frame_time(t - 1e-4))
-        {
-            self.seek(p);
-        } else {
-            self.player.command("frame-back-step", &[]);
+        let info = self.selected.and_then(|id| self.info(id));
+        let seeking = self.pending_seek.is_some() || self.seek_target.is_some();
+        match (forward, info) {
+            (true, Some(info)) if seeking => {
+                let fi = &info.frames;
+                let t = self.effective_time();
+                if let Some(next) = fi.frames.get(fi.idx_at_or_after(t + 1e-4)).map(|f| f.t) {
+                    self.seek(next);
+                }
+            }
+            (true, _) => {
+                self.player.command("set", &["speed", "32"]);
+                self.player.command("frame-step", &[]);
+                self.fast_step = Some(Instant::now());
+            }
+            (false, Some(info)) => {
+                if let Some(p) = info.frames.prev_frame_time(self.effective_time() - 1e-4) {
+                    self.seek(p);
+                }
+            }
+            (false, None) => self.player.command("frame-back-step", &[]),
         }
     }
 
@@ -559,7 +662,7 @@ impl App {
         let Some(info) = self.selected.and_then(|id| self.info(id)) else {
             return;
         };
-        let t = self.source_time();
+        let t = self.effective_time();
         let k = if forward {
             info.frames.next_key_at_or_after(t + 1e-3)
         } else {
@@ -571,16 +674,14 @@ impl App {
     }
 
     pub fn play_pause(&mut self) {
-        if self.fast_step.take().is_some() {
-            self.player.command("set", &["speed", "1"]);
-        }
+        self.cancel_fast_step();
         self.player.command("cycle", &["pause"]);
     }
 
     /// Playhead snapped to the nearest frame of the selected clip.
     pub fn snapped_playhead(&self) -> Option<f64> {
         let info = self.info(self.selected?)?;
-        Some(info.frames.snap(self.source_time()))
+        Some(info.frames.snap(self.effective_time()))
     }
 
     pub fn set_start(&mut self) {
@@ -626,11 +727,10 @@ impl App {
             match e {
                 PlayerEvent::Prop("time-pos", _) | PlayerEvent::Prop("pause", _) => {
                     if self.fast_step.is_some() && self.player.state.pause {
-                        self.player.command("set", &["speed", "1"]);
-                        self.fast_step = None;
+                        self.cancel_fast_step();
                     }
                 }
-                PlayerEvent::EndFile => {}
+                PlayerEvent::PlaybackRestart => self.seek_target = None,
                 _ => {}
             }
         }
@@ -638,9 +738,16 @@ impl App {
             .fast_step
             .is_some_and(|t| t.elapsed() > Duration::from_secs(2))
         {
-            self.player.command("set", &["speed", "1"]);
-            self.fast_step = None;
+            self.cancel_fast_step();
         }
+        // safety net in case a playback-restart event never arrives
+        if self.seek_target.is_some() {
+            self.seek_target_age += 1;
+            if self.seek_target_age > 300 {
+                self.seek_target = None;
+            }
+        }
+        self.follow_preview();
     }
 
     // ------------------------------------------------------------------
@@ -689,7 +796,8 @@ impl App {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
-        if ctx.egui_wants_keyboard_input() || self.export.is_modal_open() {
+        // no shortcuts while typing, in a dialog, or while dragging a segment edge
+        if ctx.egui_wants_keyboard_input() || self.export.is_modal_open() || self.drag.is_some() {
             return;
         }
         let ev = |k: Key, m: Modifiers| ctx.input_mut(|i| i.consume_key(m, k));
@@ -857,11 +965,7 @@ impl App {
                     );
                 }
             }
-            let probing = self
-                .media
-                .values()
-                .filter(|m| m.info.is_none() && m.error.is_none())
-                .count();
+            let probing = self.pending_count();
             if probing > 0 {
                 ui.separator();
                 ui.spinner();
@@ -896,11 +1000,7 @@ impl App {
         let avail = ui.available_rect_before_wrap();
         ui.allocate_rect(avail, egui::Sense::hover());
         ui.painter().rect_filled(avail, 0.0, egui::Color32::BLACK);
-        if let Some(err) = self
-            .selected
-            .and_then(|id| self.media.get(&id))
-            .and_then(|m| m.error.clone())
-        {
+        if let Some(err) = self.selected.and_then(|id| self.probe_error(id)) {
             ui.painter().text(
                 avail.center(),
                 egui::Align2::CENTER_CENTER,
@@ -986,6 +1086,8 @@ impl App {
 
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        // a running export must not outlive the window (its ffmpeg would keep writing)
+        self.cancel_export_and_wait();
         // free the render context while the GL context is current, before the mpv handle
         self.renderer = None;
         // scripted test runs must not change the user's settings
@@ -1044,12 +1146,8 @@ impl eframe::App for App {
         if let Some(Renderer::Gl(r)) = &self.renderer {
             r.report_swap();
         }
-        let busy = self.export.is_running()
-            || self.encoders_rx.is_some()
-            || self
-                .media
-                .values()
-                .any(|m| m.info.is_none() && m.error.is_none());
+        let busy =
+            self.export.is_running() || self.encoders_rx.is_some() || self.pending_count() > 0;
         if busy {
             ctx.request_repaint_after(Duration::from_millis(250));
         }

@@ -77,10 +77,7 @@ impl App {
                 "wait-probed" => {
                     let selected_readable = self.selected.and_then(|id| self.info(id)).is_some();
                     !self.project.clips.is_empty()
-                        && self
-                            .media
-                            .values()
-                            .all(|m| m.info.is_some() || m.error.is_some())
+                        && self.pending_count() == 0
                         && (!selected_readable || self.player.state.duration > 0.0)
                 }
                 "select" => {
