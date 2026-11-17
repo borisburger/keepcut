@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/keepcut-core", "crates/keepcut-cli"]
+members = ["crates/keepcut-core", "crates/keepcut-cli", "crates/keepcut-player"]
 
 [workspace.package]
 version = "0.1.0"

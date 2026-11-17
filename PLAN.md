@@ -1,6 +1,6 @@
 # Keepcut — Implementation Plan
 
-Status: **final plan; Phase 0A (export pipeline spike) implemented and passing on the sample corpus** (2026-11-17; results and decisions in §3.3). Next: the open 0A items listed in §11, then Phase 0B. Written and finalized 2026-11-17.
+Status: **Phase 0A (export pipeline) and Phase 0B (player) spikes done** on the author's Windows laptop (results and decisions: §3.3–3.5); **Phase 1 (MVP GUI) in progress** since 2026-11-18. Open spike items are listed in §11. Plan written and finalized 2026-11-17.
 This document is self-contained: it assumes no access to the planning conversation.
 
 ### Start here (for the implementer)
@@ -86,7 +86,8 @@ Transitions/fades, titles/overlays, effects, cropping, rotation editing, multi-t
 | UI toolkit | **egui via eframe** (eframe 0.37.0, released 2026-10-15), using the **`glow` (OpenGL) renderer** (`Renderer::Glow`; recent eframe defaults to wgpu, so select glow explicitly) | Native Rust; draws everything itself, so it looks the same on every OS. Popularity equal to iced (~32k GitHub stars each), very active. **Decisive reason:** libmpv's render API outputs only to OpenGL or to a CPU buffer. eframe's glow backend exposes the GL context (`CreationContext::gl`) and loader (`CreationContext::get_proc_address`), so mpv renders on the GPU directly into a texture egui displays. iced is wgpu-only (no GL backend); it would need platform-specific GL↔wgpu interop or the slower CPU path. Immediate mode also suits the custom timeline and snapshot undo. |
 | Video playback | **libmpv OpenGL render API** rendering into an app-owned GL framebuffer/texture, shown in egui via `egui_glow` native texture registration | mpv plays everything, does exact-frame seeking, frame back-step and hardware decoding, and its EDL playlists give a free "cut preview". |
 | Playback fallback | libmpv **software** render API (`MPV_RENDER_API_TYPE_SW`) into an `egui::TextureHandle` (`set()` per frame) | Same toolkit; used if GL interop misbehaves on some machine/driver. Selectable in Settings. |
-| Rust mpv bindings | `libmpv2` (crates.io, v7.0.1, repo `kohsine/libmpv-rs`) for the client API and, if present, its render module; otherwise raw FFI via `libmpv2-sys` | Verify the render API coverage in 7.x. |
+| Rust mpv bindings | `libmpv2` (crates.io, v7.0.1, repo `kohsine/libmpv-rs`) for the client API (commands, properties, events); **render contexts via raw FFI over `libmpv2-sys`** | Verified in 0B: libmpv2's render module covers OpenGL only (no SW), and its `RenderContext<'_>` borrows the handle. A small own wrapper (`keepcut-player/src/render.rs`) does both GL and SW. `Mpv::ctx` is public. |
+| libmpv for Windows | **Official mpv release build**, `libmpv-v<ver>-x86_64-w64-mingw32-lgpl.zip` from github.com/mpv-player/mpv releases (v0.42.0 in 0B), with its `.asc` signature | Upstream now publishes signed Windows builds of libmpv (GPL and LGPL variants), so no third-party build is needed. **LGPL** variant: playback needs nothing GPL-only; all encoding runs in the separate GPL `ffmpeg.exe`. |
 | Media processing | **ffmpeg/ffprobe CLI** bundled next to the binary (not linked as a library) | Process overhead (~10–50 ms) is negligible against I/O and encoding. Crash isolation, swappable builds, loggable reproducible commands, no FFI churn. LosslessCut does the same. |
 | Intermediate files | Hidden temp dir, always deleted (also on cancel/crash at next start) | The user only cares not to manage files. |
 | Encoding modes | **Smart** (default) and **Full re-encode**, chosen per export (§6.0) | Smart keeps the original quality; Full gives control over codec/size/resolution and is the safe fallback if a Smart export fails verification. |
@@ -211,6 +212,37 @@ Projects `b4k-h264`, `b4k-hevc`, `b1080-h264-2997`, `b4k-av1`, `b4k-mixed` (H.26
 2. **AV1 can't use MPEG-TS** (this ffmpeg writes it as an opaque `bin_data` stream), and **Bandicam's NVENC AV1 files have a malformed `av1C`**: first byte `0xC0` (version 64) instead of `0x81`; the sequence header inside it is valid. libaom only warns ("Unknown version 64 of AV1CodecConfigurationRecord"), but the Matroska, IVF (its forced `av1_metadata` filter) and MP4 muxers all refuse it. **Decision:** intermediates for codecs other than H.264/HEVC are **NUT** (stores codec headers without parsing; keeps VFR timestamps). For AV1 outputs, the final mux adds `extract_extradata` before `setts`, so the MP4 gets a valid `av1C` built from the in-band sequence header. The output decodes with zero messages, not even the version warning.
 3. **AV1 heads** use `libaom-av1 -usage good -cpu-used 6 -row-mt 1 -tiles 2x2 -crf 28 -b:v 0` (software, like the other heads). 4K, 100 frames: libaom 11.4 s, 0.42× the source size, SSIM 0.9993; `av1_nvenc -cq 36`: 1.8 s, 1.17×, SSIM 0.998 (cq 25/30 are larger than the source; cq 42: 0.87×, 0.996). av1_nvenc cq 36 is the "Fast heads" setting for AV1. This ffmpeg build has no SVT-AV1; decoding AV1 uses libaom too (no dav1d in the gyan.dev essentials build; consider the full build or hardware decoding later).
 4. **Windows Media Player shows the Bandicut clips darker than VLC.** Their source files (`Katka50-*` without "Hudba") are Bandicut NVENC re-encodes of phone HDR footage: 8-bit H.264 that kept the **HLG / BT.2020** tags. Media Player honors the tags and tone-maps; VLC ignores them. The author confirmed the source looks equally dark in Media Player, so Keepcut's outputs are faithful (tags copied). Optional later: offer to retag such clips as BT.709 if the content is really SDR, or flag "HDR-tagged 8-bit" clips in the clip list.
+
+### 3.5 Spike 0B results: player (2026-11-18, author's Windows laptop)
+`crates/keepcut-player` (eframe 0.37 glow + libmpv v0.42.0 official LGPL build). Features: open file (dialog or argument), play/pause, seek by timeline click/drag, frame step both ways, keyframe jumps from the `keepcut-core` frame index (keyframe ticks on the timeline), cut preview of typed segments via EDL, `--project <json>` previews all segments of a project via EDL, debug overlay (render path, hwdec, fps, drops, render ms, CPU), GL path with automatic fallback to the SW path, `--sw`, `--hwdec`, `--step-mode`, `--bench` (scripted gate: 10 s play, 8 random seeks, 8 steps, 8 back-steps inside a GOP; prints JSON), `--screenshot PATH` / F12 (egui's own frame capture). Benchmarks: `crates/keepcut-player/bench.ps1`.
+
+Release build, window 1400×900 (video area ≈ 1300×700 logical). Times in ms, avg / max; CPU = % of one core during playback.
+
+| File | Path | Playback | CPU | Seek | Frame step | Back-step |
+|---|---|---|---|---|---|---|
+| DaVinci 1080×1920 H.264 30p, B-frames | GL | 29.9/29.97 fps, 0 drops | 13–15 | 77 / 115 | 46 (fast) | 71 / 86 (index seek) |
+| Bandicam 1080p H.264, 12 s GOP | GL | 11.6 fps (VFR), 0 drops | 9 | 177–239 / 266–397 | 47 (fast) | 224–243 / 283–298 |
+| 6-hour Bandicam 1080p, ~32 s GOP | GL | 13.3 fps (VFR), 0 drops | 13–14 | 181–288 / 267–464 | 70 (fast) | 162–223 / 183–281 |
+| Bandicam 4K HEVC QSV | GL | 9.0 fps (VFR), 0 drops | 12–14 | 311–318 / 483–517 | 52 (fast) | 305–310 / 317–333 |
+| synthetic 4K30 H.264 | GL | 29.9 fps, 0 drops | 20 | — | 76 | — |
+| synthetic 4K60 HEVC Main10 | GL | 59.8 fps, 0 drops | 42–47 | **531 / 1034** | 78 | 644 |
+| Bandicam 4K AV1 (NVENC) | GL | 14.8 fps, 0 drops, **software decode** (hwdec "no") | 35 | 144 / 155 | 113 (mpv) | — |
+| DaVinci 1080p30 | SW | 29.6 fps, 0 drops | 80 | 66 / 132 | 63 | 42 |
+| 6-hour Bandicam | SW | 13.3 fps, 0 drops | 114 | 187 / 282 | 89 | 132 |
+| synthetic 4K30 H.264 | SW | 29.8 fps, 0 drops | 138 | 474 / 700 | 64 | 358 |
+| synthetic 4K60 HEVC Main10 | SW | 59.6 fps, 0 drops | 276 | 498 / 1034 | 86 | 592 |
+
+**Findings and decisions:**
+1. **GL path works** on this hybrid Intel + NVIDIA laptop: mpv renders into an app-owned FBO/texture registered with `Frame::register_native_glow_texture`; the texture object is resized in place (`glTexImage2D` on the same name), so the egui `TextureId` stays valid. After rendering, bind framebuffer 0 and reset the viewport. **No `FLIP_Y`**: with egui's texture coordinates the unflipped FBO is upright (FLIP_Y=1 showed the video upside down). Render cost 0.2–0.4 ms per frame.
+2. **Hardware decoding is copy-back** (`d3d11va-copy`) with `hwdec=auto-safe` and `auto`. Zero-copy `d3d11va` and `nvdec` cannot interop with this GL context and mpv falls back to software decoding (130% CPU at 4K60). Copy-back still plays 4K60 HEVC 10-bit smoothly at ~45% CPU. **Default stays `auto-safe`.** mpv v0.42 also ships `render_d3d11.h`, a D3D11 render API; a possible zero-copy Windows path later, but egui's glow renderer can't consume it directly.
+3. **Frame step:** mpv's `frame-step` plays until the next frame is due, so on Bandicam VFR footage (frame gaps up to 0.5 s) it took 113–278 ms. **Decision ("auto" step mode, default):** forward = `frame-step` at `speed=32` (reset to 1 afterwards) → 46–70 ms avg; backward = exact seek to the previous frame from the frame index (decodes from the keyframe; 71–310 ms even inside ~32 s GOPs, far under the 1.5 s gate). The ~220 ms maxima are the first step after a seek.
+4. **Seek latency:** 1080p 77–290 ms avg; the 6-hour file averages under the 300 ms gate but peaks at 464 ms. **4K60 HEVC 10-bit with copy-back hwdec: 531 ms avg, 1034 ms max: fails the 500 ms gate**, while software decoding seeks in 185 ms (at 130% CPU during playback). Open: try `hwdec-extra-frames`, `vd-lavc-threads`, or switching to software decoding while paused/scrubbing.
+5. **SW fallback works** and even keeps up with 4K60, but at 1.4–2.8 cores; fine as a fallback, as planned.
+6. **AV1** plays with software decoding (libmpv's bundled dav1d), smooth at 4K15 with 35% CPU. AV1 hardware decoding didn't engage through `auto-safe`; not investigated.
+7. **CPU** on the GL path: 9–47% of one core, "well under 1 core" ✓.
+8. **Exit order:** the mpv render context must be freed before the mpv handle and while the GL context is current: free it in `App::on_exit(gl)`; otherwise the process crashed on exit (`0xC0000409`).
+9. **Screenshots for debugging** use egui's own frame capture (`ViewportCommand::Screenshot`), never screen-region copies (a screen copy caught the Windows task switcher and the user's other windows).
+10. Not yet checked: the AMD laptop, Linux X11/Wayland, a large monitor at 4K output size, HDR display.
 
 ## 4. Architecture
 
@@ -591,7 +623,7 @@ Smart mode is where 4K pays off most: copied parts cost nothing extra at 4K. The
 - **Controls → mpv commands:**
   - play/pause: `cycle pause`
   - seek: `seek <t> absolute+exact`
-  - frame step: `frame-step` / `frame-back-step`
+  - frame step (decided in 0B, §3.5 item 3): forward `set speed 32` + `frame-step`, then `set speed 1`; backward `seek <previous frame pts> absolute+exact` from the frame index (mpv's `frame-back-step` as fallback without an index)
   - keyframe jumps: compute from the frame index, then `seek <K> absolute+exact`
   - observe `time-pos`, `pause`, `eof-reached`, `duration`.
 - **Cut preview / project preview via EDL:**
@@ -719,7 +751,7 @@ Smart mode is where 4K pays off most: copied parts cost nothing extra at 4K. The
 
 ### Windows
 - Bundle `ffmpeg.exe` + `ffprobe.exe`: GPL builds with nvenc/amf/qsv, from gyan.dev or BtbN. Check the build's minimum NVIDIA driver; a release-branch build may support older drivers than the latest one.
-- Bundle `libmpv-2.dll` from shinchiro's `mpv-winbuild-cmake` releases (`mpv-dev-x86_64-*.7z`). The package's import library is MinGW-style; for the MSVC toolchain, generate `mpv.lib` as described in §10a.
+- Bundle `libmpv-2.dll` from the official mpv release (`libmpv-v<ver>-x86_64-w64-mingw32-lgpl.zip`; §2). The package's import library is MinGW-style (`libmpv.dll.a`); for the MSVC toolchain, `fetch-mpv.ps1` generates `mpv.lib` (§10a). Ship the zip's `LICENSE.LGPL` alongside. Note the DLL is 126 MB unpacked (it bundles FFmpeg and its dependencies); it compresses well in the installer.
 - Portable `.zip` and an installer (Inno Setup or `cargo-packager`).
 - Unsigned builds trigger SmartScreen ("More info → Run anyway"); code signing is optional later.
 
@@ -755,7 +787,7 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
    - Equivalent manual route: `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` then `winget install --id Rustlang.Rustup`.
    - Alternative considered: the GNU toolchain (`x86_64-pc-windows-gnu` via MSYS2). It's smaller and links libmpv's MinGW import library directly, but it's less common on Windows. Not chosen.
 2. **libmpv for development** (the implementer scripts this; nothing to install system-wide):
-   - `packaging/windows/fetch-mpv.ps1` downloads shinchiro's `mpv-dev-x86_64-<date>.7z` from the `mpv-winbuild-cmake` GitHub releases. Use the plain `x86_64` build, not `x86_64-v3`, so it runs on older CPUs. Extract it into `third_party/mpv/` (gitignored).
+   - **Done (0B):** `packaging/windows/fetch-mpv.ps1 [-Tag v0.42.0] [-Variant lgpl|gpl]` downloads the official `libmpv-v<ver>-x86_64-w64-mingw32-<variant>.zip` (+ `.asc`) from github.com/mpv-player/mpv releases, unzips it into `third_party/mpv/` (gitignored), and builds `mpv.lib` with `dumpbin`/`lib` found via `vswhere`. `crates/keepcut-player/build.rs` adds the link path and copies `libmpv-2.dll` next to the executable (it finds `target/<profile>` by name; cargo 1.100 nests build-script output one level deeper than older versions).
    - Create an MSVC import library from the DLL: `dumpbin /exports libmpv-2.dll` → `mpv.def` → `lib /def:mpv.def /name:libmpv-2.dll /out:mpv.lib /machine:x64`, unless the package already contains a usable `.lib`.
    - Point the linker at it in `.cargo/config.toml`: `[target.x86_64-pc-windows-msvc] rustflags = ["-L", "native=third_party/mpv"]`. Check the `libmpv2-sys` README for the exact library name it links (`mpv` vs `libmpv`).
    - Copy `libmpv-2.dll` next to the built executable (from a `build.rs` of the GUI crate, or an `xtask`).
@@ -804,6 +836,7 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
 
 **0B Player spike** (minimal eframe/glow app): open a file; play/pause; seek; frame step both ways; keyframe jump; EDL cut preview; the GL render path and the SW fallback.
 - **Accept** on the performance gate in §7. Record the results in this file.
+- **0B status (2026-11-18):** implemented in `crates/keepcut-player`; results in §3.5. Passes on the author's Windows laptop except the 4K60 HEVC seek target (531 ms avg vs 500 ms). Still open: the AMD laptop (Windows), Linux X11 and Wayland, and the 4K seek investigation.
 
 ### Phase 1 — MVP
 - Workspace and app skeleton, config, logging.
