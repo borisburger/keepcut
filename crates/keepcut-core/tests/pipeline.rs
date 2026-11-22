@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use keepcut_core::encoders::EncoderSet;
+use keepcut_core::encoders::{self, EncoderSet};
 use keepcut_core::exec::{self, ExecOptions};
 use keepcut_core::ffmpeg::{self, CancelToken, LogSink, RunOpts, Tools};
 use keepcut_core::model::{
@@ -26,6 +26,14 @@ fn tools() -> Option<Tools> {
             None
         }
     }
+}
+
+/// The software encoders this ffmpeg really has (Homebrew's lacks libaom), detected
+/// once per test binary.
+fn software_encoders(t: &Tools) -> EncoderSet {
+    static SET: std::sync::OnceLock<EncoderSet> = std::sync::OnceLock::new();
+    SET.get_or_init(|| encoders::detect_software(t).expect("detecting software encoders"))
+        .clone()
 }
 
 fn log() -> LogSink {
@@ -107,7 +115,7 @@ fn export_project(t: &Tools, project: Project) -> (plan::ExportPlan, Vec<PathBuf
         .iter()
         .map(|c| probe::probe(t, &c.path, None, None).unwrap())
         .collect();
-    let plan = plan::build(&project, &infos, &EncoderSet::software_only()).unwrap();
+    let plan = plan::build(&project, &infos, &software_encoders(t)).unwrap();
     let opts = ExecOptions {
         decode_check: DecodeCheck::Full,
         ..Default::default()
@@ -582,7 +590,7 @@ fn soundtrack_replaces_the_audio() {
         .iter()
         .map(|c| probe::probe(&t, &c.path, None, None).unwrap())
         .collect();
-    let plan = plan::build(&p, &infos, &EncoderSet::software_only()).unwrap();
+    let plan = plan::build(&p, &infos, &software_encoders(&t)).unwrap();
     assert!(plan.outputs.iter().all(|o| o.soundtrack.is_none()));
     assert!(plan.warnings.iter().any(|w| w.contains("soundtrack")));
 }

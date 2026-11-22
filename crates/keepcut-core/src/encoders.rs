@@ -24,6 +24,7 @@ pub const CANDIDATES: &[&str] = &[
     "libx264",
     "libx265",
     "libaom-av1",
+    "libsvtav1",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -45,6 +46,14 @@ impl EncoderSet {
             .iter()
             .map(String::as_str)
             .find(|e| e.starts_with(prefix) && !is_software(e))
+    }
+    /// The software encoder for `codec`. AV1: libaom (calibrated), or SVT-AV1 where the
+    /// ffmpeg build has no libaom (Homebrew's).
+    pub fn software(&self, codec: VideoCodec) -> &'static str {
+        match codec {
+            VideoCodec::Av1 if !self.has("libaom-av1") && self.has("libsvtav1") => "libsvtav1",
+            c => software_encoder(c),
+        }
     }
     /// Only software encoders (for tests and when detection is skipped).
     pub fn software_only() -> EncoderSet {
@@ -80,7 +89,7 @@ pub fn codec_of_encoder(enc: &str) -> Option<VideoCodec> {
     match enc {
         "libx264" => Some(VideoCodec::H264),
         "libx265" => Some(VideoCodec::Hevc),
-        "libaom-av1" => Some(VideoCodec::Av1),
+        "libaom-av1" | "libsvtav1" => Some(VideoCodec::Av1),
         e if e.starts_with("h264_") => Some(VideoCodec::H264),
         e if e.starts_with("hevc_") => Some(VideoCodec::Hevc),
         e if e.starts_with("av1_") => Some(VideoCodec::Av1),
@@ -105,7 +114,7 @@ pub fn counterpart(enc: &str, codec: VideoCodec) -> Option<String> {
 /// Human name of an encoder for menus: "NVIDIA NVENC (h264_nvenc)".
 pub fn describe(enc: &str) -> String {
     let vendor = match enc {
-        "libx264" | "libx265" | "libaom-av1" => "software",
+        "libx264" | "libx265" | "libaom-av1" | "libsvtav1" => "software",
         e if e.ends_with("_nvenc") => "NVIDIA NVENC",
         e if e.ends_with("_amf") => "AMD AMF",
         e if e.ends_with("_qsv") => "Intel Quick Sync",
@@ -151,8 +160,28 @@ pub fn detect(
     cancel: Option<&CancelToken>,
     log: Option<&LogSink>,
 ) -> Result<EncoderSet> {
+    detect_among(tools, CANDIDATES.iter().copied(), cancel, log)
+}
+
+/// Test-encodes only the software candidates (tests: fast, and true to the local
+/// ffmpeg build, which may lack libaom or have SVT-AV1).
+pub fn detect_software(tools: &Tools) -> Result<EncoderSet> {
+    detect_among(
+        tools,
+        CANDIDATES.iter().copied().filter(|e| is_software(e)),
+        None,
+        None,
+    )
+}
+
+fn detect_among<'a>(
+    tools: &Tools,
+    candidates: impl Iterator<Item = &'a str>,
+    cancel: Option<&CancelToken>,
+    log: Option<&LogSink>,
+) -> Result<EncoderSet> {
     let mut set = EncoderSet::default();
-    for &enc in CANDIDATES {
+    for enc in candidates {
         let out = ffmpeg::run(
             &test_cmd(tools, enc, 320, 240, "yuv420p"),
             RunOpts {
@@ -322,7 +351,7 @@ impl VideoEncode {
         };
         let big = self.height >= 2160;
         let hevc = e.starts_with("hevc") || e == "libx265";
-        let av1 = e.starts_with("av1") || e == "libaom-av1";
+        let av1 = e.starts_with("av1") || e == "libaom-av1" || e == "libsvtav1";
         let mut x265_params: Vec<String> = Vec::new();
 
         match (e, &self.quality) {
@@ -359,6 +388,23 @@ impl VideoEncode {
                 if !matches!(q, Quality::BitrateKbps(_)) {
                     push(&mut a, "-b:v", "0");
                 }
+            }
+            ("libsvtav1", q) => {
+                // not calibrated like libaom (no SVT-AV1 build at hand): presets 6–8 are
+                // SVT's middle ground, crf a little below libaom's to err on quality
+                let preset = match (self.role, big) {
+                    (Role::Head, false) => "6",
+                    (_, false) => "8",
+                    (_, true) => "10",
+                };
+                push(&mut a, "-preset", preset);
+                match q {
+                    Quality::MatchSource => push(&mut a, "-crf", "26"),
+                    Quality::Crf(c) => push(&mut a, "-crf", &c.to_string()),
+                    Quality::BitrateKbps(b) => push(&mut a, "-b:v", &format!("{b}k")),
+                }
+                // keyframes start closed GOPs, as the copied parts expect
+                push(&mut a, "-svtav1-params", "irefresh-type=2");
             }
             ("libx265", q) => {
                 push(&mut a, "-preset", if big { "fast" } else { "medium" });
@@ -517,6 +563,41 @@ mod tests {
         assert_eq!(
             failure_reason("[AMF @ 0000] DLL amfrt64.dll failed to open\n[h264_amf @ 01] x\n"),
             "DLL amfrt64.dll failed to open"
+        );
+    }
+
+    #[test]
+    fn software_av1_falls_back_to_svt() {
+        let set = |names: &[&str]| EncoderSet {
+            working: names.iter().map(|s| s.to_string()).collect(),
+            failed: Vec::new(),
+        };
+        let both = set(&["libx264", "libaom-av1", "libsvtav1"]);
+        assert_eq!(both.software(VideoCodec::Av1), "libaom-av1");
+        let svt = set(&["libx264", "libsvtav1"]);
+        assert_eq!(svt.software(VideoCodec::Av1), "libsvtav1");
+        assert_eq!(svt.software(VideoCodec::H264), "libx264");
+        assert_eq!(codec_of_encoder("libsvtav1"), Some(VideoCodec::Av1));
+        let v = VideoEncode {
+            encoder: "libsvtav1".into(),
+            role: Role::Head,
+            quality: Quality::MatchSource,
+            pix_fmt: "yuv420p".into(),
+            profile: Some("main".into()),
+            level: None,
+            color_primaries: None,
+            color_trc: None,
+            colorspace: None,
+            color_range: None,
+            bframes: 0,
+            gop: None,
+            tune: None,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            v.args().join(" "),
+            "-c:v libsvtav1 -preset 6 -crf 26 -svtav1-params irefresh-type=2 -pix_fmt yuv420p -bf 0"
         );
     }
 

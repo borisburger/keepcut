@@ -359,7 +359,7 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
             let copyable =
                 s.encoding == EncodingMode::Smart && (!joined || sig_of(v) == *target_sig);
             let pieces = match s.encoding {
-                EncodingMode::Smart if copyable => smart_pieces(info, v, seg, reference)?,
+                EncodingMode::Smart if copyable => smart_pieces(info, v, seg, reference, encoders)?,
                 EncodingMode::Smart => {
                     let enc = mismatch_encode(
                         info,
@@ -622,10 +622,11 @@ fn smart_pieces(
     v: &VideoStream,
     seg: &Segment,
     reference: &VideoStream,
+    encoders: &EncoderSet,
 ) -> Result<Vec<Piece>> {
     let fi = &info.frames;
     let (s, e) = (seg.start, seg.end);
-    let head_enc = || head_encode(v, reference);
+    let head_enc = || head_encode(v, reference, encoders);
     let at_end = (e - fi.end).abs() < EPS;
 
     let whole = || {
@@ -774,10 +775,10 @@ fn base_encode(
 }
 
 /// Head/tail encode: software encoder, parameters copied from the target.
-fn head_encode(_src: &VideoStream, reference: &VideoStream) -> VideoEncode {
+fn head_encode(_src: &VideoStream, reference: &VideoStream, set: &EncoderSet) -> VideoEncode {
     let codec = encoders::codec_of_name(&reference.codec_name).unwrap_or(VideoCodec::H264);
     base_encode(
-        encoders::software_encoder(codec),
+        set.software(codec),
         Role::Head,
         Quality::MatchSource,
         reference,
@@ -828,7 +829,7 @@ pub fn pick_encoder(
     height: u32,
     encoders: &EncoderSet,
 ) -> String {
-    let sw = encoders::software_encoder(codec);
+    let sw = encoders.software(codec);
     // a choice made for the other codec means the same family (NVENC → NVENC)
     let choice = choice.and_then(|c| encoders::counterpart(c, codec));
     match choice {
