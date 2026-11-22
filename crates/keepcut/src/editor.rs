@@ -1,48 +1,50 @@
 //! Editor panel under the video: transport, segment commands, timeline and the
 //! segment list (§8.1, §8.4).
 
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use keepcut_core::{chapters, timefmt};
 
 use crate::app::{App, Loaded};
+use crate::icons::{self, Icon};
+
+/// A shortcut shown on a button, in the monospace font: "I" in the UI font looks like "|".
+fn key(k: &str) -> egui::RichText {
+    egui::RichText::new(k).monospace()
+}
 
 impl App {
     pub fn editor(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let s = self.player.state.clone();
-            if ui
-                .button("|< Key")
-                .on_hover_text("Previous keyframe (Shift+←)")
+            if icons::button(ui, Icon::PrevKeyframe)
+                .on_hover_text("Previous keyframe (Shift + ←)")
                 .clicked()
             {
                 self.keyframe_jump(false);
             }
-            if ui
-                .button("< Frame")
+            if icons::button(ui, Icon::PrevFrame)
                 .on_hover_text("Previous frame (←)")
                 .clicked()
             {
                 self.step(false);
             }
-            let play = if s.pause { "Play" } else { "Pause" };
-            if ui
-                .button(RichText::new(play).strong())
-                .on_hover_text("Play/pause (Space)")
-                .clicked()
-            {
+            let (icon, tip) = if s.pause {
+                (Icon::Play, "Play (Space)")
+            } else {
+                (Icon::Pause, "Pause (Space)")
+            };
+            if icons::button(ui, icon).on_hover_text(tip).clicked() {
                 self.play_pause();
             }
-            if ui
-                .button("Frame >")
+            if icons::button(ui, Icon::NextFrame)
                 .on_hover_text("Next frame (→)")
                 .clicked()
             {
                 self.step(true);
             }
-            if ui
-                .button("Key >|")
-                .on_hover_text("Next keyframe (Shift+→)")
+            if icons::button(ui, Icon::NextKeyframe)
+                .on_hover_text("Next keyframe (Shift + →)")
                 .clicked()
             {
                 self.keyframe_jump(true);
@@ -62,22 +64,29 @@ impl App {
         ui.horizontal(|ui| {
             let has = self.selected.is_some_and(|id| self.info(id).is_some());
             ui.add_enabled_ui(has, |ui| {
+                let sz = icons::size(ui);
                 if ui
-                    .button("Set start  I")
+                    .add(
+                        egui::Button::new((icons::atom(Icon::MarkIn, sz), "Set start"))
+                            .shortcut_text(key("I")),
+                    )
                     .on_hover_text("Start the segment under the playhead here, or a new one")
                     .clicked()
                 {
                     self.set_start();
                 }
                 if ui
-                    .button("Set end  O")
+                    .add(
+                        egui::Button::new((icons::atom(Icon::MarkOut, sz), "Set end"))
+                            .shortcut_text(key("O")),
+                    )
                     .on_hover_text("End the segment under the playhead here, or a new one")
                     .clicked()
                 {
                     self.set_end();
                 }
                 if ui
-                    .button("Split  S")
+                    .add(egui::Button::new("Split").shortcut_text(key("S")))
                     .on_hover_text("Split the segment under the playhead")
                     .clicked()
                 {
@@ -86,7 +95,7 @@ impl App {
                 if ui
                     .add_enabled(
                         self.selected_seg.is_some(),
-                        egui::Button::new("Delete  Del"),
+                        egui::Button::new("Delete").shortcut_text(key("Del")),
                     )
                     .on_hover_text("Remove the selected segment (the footage becomes a gap)")
                     .clicked()
@@ -96,7 +105,7 @@ impl App {
                 ui.separator();
                 let on = matches!(self.loaded, Loaded::Preview { clip: Some(_), .. });
                 if ui
-                    .selectable_label(on, "Cut preview  P")
+                    .add(egui::Button::selectable(on, "Cut preview").shortcut_text(key("P")))
                     .on_hover_text("Play only the kept segments of this clip")
                     .clicked()
                 {
@@ -109,7 +118,22 @@ impl App {
                 {
                     self.timeline = Default::default();
                 }
-                ui.weak("Ctrl+wheel: zoom · Shift+drag edge: snap to keyframes");
+                // only when it fits: in a narrow window it would run over the buttons
+                let hint = egui::WidgetText::from(
+                    egui::RichText::new(
+                        "Ctrl + wheel: zoom · Shift + drag edge: snap to keyframes",
+                    )
+                    .weak(),
+                )
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                );
+                if hint.size().x <= ui.available_width() {
+                    ui.label(hint);
+                }
             });
         });
         ui.add_space(2.0);

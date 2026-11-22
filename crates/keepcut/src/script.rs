@@ -11,7 +11,7 @@
 //! set KEY VALUE (export options, see `set_export_option`) · wait-encoders · log-panel ·
 //! clip-title N TEXT · seg-title N TEXT (selected clip) · print-youtube ·
 //! save PATH · open PATH · new · relink N PATH · settings · show-save-prompt · close-dialogs ·
-//! add-dialog
+//! add-dialog · window-size W H
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -338,6 +338,15 @@ impl App {
                 "wait-encoders" => self.encoders_detected(),
                 "show-export-log" => {
                     self.export.show_finished_log();
+                    true
+                }
+                "window-size" => {
+                    // inner size in points, e.g. `window-size 1100 750`
+                    let mut it = arg
+                        .split_whitespace()
+                        .map(|v| v.parse::<f32>().unwrap_or(0.0));
+                    let (w, h) = (it.next().unwrap_or(0.0), it.next().unwrap_or(0.0));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
                     true
                 }
                 "log-panel" => {

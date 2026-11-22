@@ -10,6 +10,7 @@ mod config;
 mod dialogs;
 mod editor;
 mod export;
+mod icons;
 mod media;
 mod project;
 mod script;

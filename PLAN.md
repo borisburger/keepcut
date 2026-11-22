@@ -701,7 +701,7 @@ Smart mode is where 4K pays off most: copied parts cost nothing extra at 4K. The
 | Shift+← / Shift+→ | Previous/next keyframe |
 | Ctrl+← / Ctrl+→ | −5 s / +5 s |
 | Home / End | Clip start/end |
-| I / O | Set start / set end |
+| I / O, or [ / ] | Set start / set end |
 | S | Split at playhead |
 | Del | Delete selected segment |
 | P | Toggle cut preview (play kept segments only) |

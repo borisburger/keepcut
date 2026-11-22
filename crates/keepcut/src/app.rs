@@ -135,6 +135,7 @@ impl App {
         let config = Config::load();
         let tools = crate::settings::locate_tools(config.ffmpeg_dir.as_deref()).ok();
         cc.egui_ctx.set_theme(config.theme.preference());
+        cc.egui_ctx.set_fonts(fonts());
         let want_sw = config.render == RenderPath::Software;
         let mut kind = if want_sw {
             RenderKind::Sw
@@ -959,10 +960,11 @@ impl App {
             let last = info.frames.frames.last().map_or(0.0, |f| f.t);
             self.seek(last);
         }
-        if ev(Key::I, none) {
+        // I / O, or [ / ] (on other layouts: the keys where a US keyboard has the brackets)
+        if ev(Key::I, none) || ev(Key::OpenBracket, none) {
             self.set_start();
         }
-        if ev(Key::O, none) {
+        if ev(Key::O, none) || ev(Key::CloseBracket, none) {
             self.set_end();
         }
         if ev(Key::S, none) {
@@ -1043,14 +1045,14 @@ impl App {
             ui.separator();
             if ui
                 .add_enabled(self.history.can_undo(), egui::Button::new("Undo"))
-                .on_hover_text("Ctrl+Z")
+                .on_hover_text("Ctrl + Z")
                 .clicked()
             {
                 self.undo();
             }
             if ui
                 .add_enabled(self.history.can_redo(), egui::Button::new("Redo"))
-                .on_hover_text("Ctrl+Y")
+                .on_hover_text("Ctrl + Y")
                 .clicked()
             {
                 self.redo();
@@ -1063,7 +1065,7 @@ impl App {
                         can_export,
                         egui::Button::new(egui::RichText::new("Export…").strong()),
                     )
-                    .on_hover_text("Ctrl+E")
+                    .on_hover_text("Ctrl + E")
                     .clicked()
                 {
                     self.open_export();
@@ -1283,6 +1285,21 @@ impl App {
             self.portal_notice = false;
         }
     }
+}
+
+/// egui's fonts, with Hack (the bundled monospace font) as a fallback for proportional text:
+/// Ubuntu-Light lacks arrows (← →) and other symbols, and egui 0.37 no longer bundles its emoji
+/// fonts by default.
+fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        let at = family
+            .iter()
+            .position(|f| f == "Ubuntu-Light")
+            .map_or(0, |i| i + 1);
+        family.insert(at, "Hack".to_owned());
+    }
+    fonts
 }
 
 /// Window size before the monitor is known, and for scripted runs.

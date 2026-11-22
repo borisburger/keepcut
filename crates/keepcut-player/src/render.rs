@@ -196,11 +196,11 @@ impl GlRenderer {
         Ok(r)
     }
 
-    /// (Re)allocates the texture storage. The texture object stays the same, so
-    /// the egui `TextureId` registered for it remains valid.
-    fn resize(&mut self, size: [u32; 2]) {
+    /// (Re)allocates the texture storage; true if the size changed. The texture object stays
+    /// the same, so the egui `TextureId` registered for it remains valid.
+    fn resize(&mut self, size: [u32; 2]) -> bool {
         if size == self.size {
-            return;
+            return false;
         }
         let gl = &self.gl;
         unsafe {
@@ -248,19 +248,20 @@ impl GlRenderer {
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
         self.size = size;
-        // force a redraw at the new size
-        self.signal.notify();
+        true
     }
 
-    /// Renders a new frame if mpv has one (or the size changed). Call from the UI
-    /// thread, where the GL context is current. Returns the texture to show.
+    /// Renders a new frame if mpv has one, or redraws the current one if the size changed
+    /// (the reallocated texture is blank, and a paused video sends no new frame). Call from
+    /// the UI thread, where the GL context is current. Returns the texture to show.
     pub fn frame(&mut self, frame: &mut eframe::Frame, size: [u32; 2]) -> egui::TextureId {
         let size = [size[0].max(16), size[1].max(16)];
-        self.resize(size);
+        let resized = self.resize(size);
         let id = *self
             .texture_id
             .get_or_insert_with(|| frame.register_native_glow_texture(self.tex));
-        if self.signal.take() && self.raw.wants_frame() {
+        let new_frame = self.signal.take() && self.raw.wants_frame();
+        if resized || new_frame {
             let t0 = std::time::Instant::now();
             let mut fbo = sys::mpv_opengl_fbo {
                 fbo: self.fbo.0.get() as c_int,
