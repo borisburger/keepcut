@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 keepcut-core.workspace = true
 keepcut-player = { path = "../keepcut-player" }
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "clipboard", "wayland", "x11"] }
 egui = "0.37"
 glow = "0.17"
 rfd = "0.18"
