@@ -92,14 +92,19 @@ pub struct Player {
     pub state: State,
 }
 
+/// mpv's `hwdec` for a render path: the GL path can take GPU frames directly (zero-copy
+/// where interop exists), the software path needs them copied back to the CPU.
+pub fn default_hwdec(kind: RenderKind) -> &'static str {
+    if kind == RenderKind::Gl {
+        "auto-safe"
+    } else {
+        "auto-copy-safe"
+    }
+}
+
 impl Player {
     pub fn new(kind: RenderKind, hwdec: Option<&str>, egui_ctx: egui::Context) -> Result<Player> {
-        let default_hwdec = if kind == RenderKind::Gl {
-            "auto-safe"
-        } else {
-            "auto-copy-safe"
-        };
-        let hwdec = hwdec.unwrap_or(default_hwdec);
+        let hwdec = hwdec.unwrap_or(default_hwdec(kind));
         let mpv = Mpv::with_initializer(|init| {
             let opts: &[(&str, &str)] = &[
                 ("vo", "libmpv"),

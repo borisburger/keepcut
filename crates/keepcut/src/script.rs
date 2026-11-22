@@ -11,7 +11,7 @@
 //! set KEY VALUE (export options, see `set_export_option`) · wait-encoders · log-panel ·
 //! clip-title N TEXT · seg-title N TEXT (selected clip) · print-youtube ·
 //! save PATH · open PATH · new · relink N PATH · settings · show-save-prompt · close-dialogs ·
-//! add-dialog · window-size W H · soundtrack PATH · soundtrack-offset T · soundtrack-off · mute
+//! add-dialog · window-size W H · soundtrack PATH · soundtrack-offset T · soundtrack-off · mute · play (play/pause) · mpv-set NAME VALUE · hw-decoding auto|off
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -348,6 +348,27 @@ impl App {
                     self.set_soundtrack_offset(keepcut_core::timefmt::parse(arg).unwrap_or(0.0));
                     true
                 }
+                "hw-decoding" => {
+                    // like the Settings choice (scripted runs never save the settings)
+                    self.config.hw_decoding = if arg == "off" {
+                        crate::config::HwDecoding::Off
+                    } else {
+                        crate::config::HwDecoding::Auto
+                    };
+                    self.apply_hw_decoding();
+                    s.wait_until = Some(Instant::now() + Duration::from_millis(800));
+                    true
+                }
+                "mpv-set" => {
+                    // debugging: any mpv property, e.g. `mpv-set hwdec no`
+                    let (k, v) = arg.split_once(' ').unwrap_or((arg, ""));
+                    self.player.command("set", &[k, v]);
+                    true
+                }
+                "play" => {
+                    self.play_pause();
+                    true
+                }
                 "mute" => {
                     self.player.command("set", &["mute", "yes"]);
                     true
@@ -565,6 +586,7 @@ impl App {
                 "offset": st.offset,
             })),
             "loudness": format!("{:?}", self.project.export.loudness),
+            "hwdec": self.player.state.hwdec,
             // the audio track mpv plays: an external file (the soundtrack) or the clips' own
             "audio_file": self.player.mpv.get_property::<String>("current-tracks/audio/external-filename").ok(),
             "audio_track": self.player.mpv.get_property::<i64>("current-tracks/audio/id").ok(),

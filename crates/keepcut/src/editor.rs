@@ -1,5 +1,6 @@
 //! Editor panel under the video: transport, segment commands, timeline and the
-//! segment list (§8.1, §8.4).
+//! segment list (§8.1, §8.4). The list moves beside the video when it is narrow enough
+//! to leave room (portrait video).
 
 use eframe::egui;
 use keepcut_core::{chapters, timefmt};
@@ -138,71 +139,152 @@ impl App {
         });
         ui.add_space(2.0);
         self.timeline(ui);
-        ui.add_space(2.0);
-        self.segment_list(ui);
+        // the list is under the timeline unless there's room beside the video
+        // (App::segments_beside); its height is measured for that decision
+        if self.segments_beside {
+            self.editor_list_height = 0.0;
+        } else {
+            let top = ui.cursor().top();
+            ui.add_space(2.0);
+            self.segment_list(ui);
+            self.editor_list_height = ui.cursor().top() - top;
+        }
         ui.add_space(4.0);
     }
 
-    fn segment_list(&mut self, ui: &mut egui::Ui) {
-        let Some(id) = self.selected else { return };
-        let Some(info) = self.info(id) else { return };
-        let segs = self.segments(id).to_vec();
+    /// The selected clip's segments as shown in the list.
+    fn segment_rows(&self) -> Option<Vec<SegRow>> {
+        let id = self.selected?;
+        let info = self.info(id)?;
+        let segs = self.segments(id);
         let clip_title = self
             .clip(id)
             .and_then(|c| c.chapter_title.clone())
             .unwrap_or_else(|| info.file_stem());
-        let mut select = None;
-        let mut delete = None;
-        let mut title_change: Option<(uuid::Uuid, String)> = None;
-        let mut title_focus = false;
+        Some(
+            segs.iter()
+                .enumerate()
+                .map(|(i, s)| SegRow {
+                    id: s.id,
+                    start: s.start,
+                    end: s.end,
+                    head: if info.frames.is_key_at(s.start) {
+                        Head::Copied
+                    } else {
+                        info.frames
+                            .next_key_at_or_after(s.start)
+                            .filter(|k| *k < s.end)
+                            .map_or(Head::Reencoded, |k| Head::Reencodes(k - s.start))
+                    },
+                    title: s.chapter_title.clone().unwrap_or_default(),
+                    hint: chapters::default_segment_title(&clip_title, i, segs.len()),
+                })
+                .collect(),
+        )
+    }
+
+    /// The segment list under the timeline: a table.
+    fn segment_list(&mut self, ui: &mut egui::Ui) {
+        let Some(rows) = self.segment_rows() else { return };
+        let mut act = SegActions::default();
         egui::ScrollArea::vertical().max_height(130.0).auto_shrink([false, true]).show(ui, |ui| {
             egui::Grid::new("segments").striped(true).num_columns(7).spacing([16.0, 2.0]).show(ui, |ui| {
                 for h in ["#", "Start", "End", "Duration", "Start frame", "Chapter title", ""] {
                     ui.strong(h);
                 }
                 ui.end_row();
-                for (i, s) in segs.iter().enumerate() {
-                    let selected = self.selected_seg == Some(s.id);
+                for (i, r) in rows.iter().enumerate() {
+                    let selected = self.selected_seg == Some(r.id);
                     if ui.selectable_label(selected, format!("{}", i + 1)).clicked() {
-                        select = Some((s.id, s.start));
+                        act.select = Some((r.id, r.start));
                     }
-                    ui.monospace(timefmt::display(s.start));
-                    ui.monospace(timefmt::display(s.end));
-                    ui.monospace(timefmt::display(s.duration()));
-                    if info.frames.is_key_at(s.start) {
-                        ui.label("keyframe: copied");
-                    } else {
-                        let head = info.frames.next_key_at_or_after(s.start).filter(|k| *k < s.end).map(|k| k - s.start);
-                        match head {
-                            Some(h) => ui.colored_label(ui.visuals().warn_fg_color, format!("re-encodes {h:.1} s")),
-                            None => ui.colored_label(ui.visuals().warn_fg_color, "re-encoded"),
-                        };
-                    }
-                    let mut text = s.chapter_title.clone().unwrap_or_default();
-                    let hint = chapters::default_segment_title(&clip_title, i, segs.len());
-                    let r = ui
-                        .add(egui::TextEdit::singleline(&mut text).hint_text(hint).desired_width(180.0))
-                        .on_hover_text("Title of this segment's chapter (per-segment chapters). Empty: the default shown.");
-                    title_focus |= r.gained_focus();
-                    if r.changed() {
-                        title_change = Some((s.id, text));
-                    }
-                    if ui.small_button("Remove").on_hover_text("Delete this segment").clicked() {
-                        delete = Some(s.id);
-                    }
+                    ui.monospace(timefmt::display(r.start));
+                    ui.monospace(timefmt::display(r.end));
+                    ui.monospace(timefmt::display(r.end - r.start));
+                    r.head.label(ui);
+                    r.title_edit(ui, 180.0, &mut act);
+                    r.remove_button(ui, &mut act);
                     ui.end_row();
                 }
             });
-            if segs.is_empty() {
-                ui.weak("Nothing kept from this clip. Use Set start (I) / Set end (O) to keep a part.");
+            if rows.is_empty() {
+                ui.weak(EMPTY_HINT);
             }
         });
+        self.apply_segment_actions(act);
+    }
+
+    /// The segment list beside a narrow video: one card per segment, filling the height.
+    pub fn segment_cards(&mut self, ui: &mut egui::Ui) {
+        let Some(rows) = self.segment_rows() else { return };
+        let mut act = SegActions::default();
+        let kept: f64 = rows.iter().map(|r| r.end - r.start).sum();
+        ui.horizontal(|ui| {
+            ui.strong("Segments");
+            if !rows.is_empty() {
+                ui.weak(format!("{} · {} kept", rows.len(), timefmt::display(kept)));
+            }
+        });
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for (i, r) in rows.iter().enumerate() {
+                let selected = self.selected_seg == Some(r.id);
+                let mut frame = egui::Frame::group(ui.style()).inner_margin(6.0);
+                if selected {
+                    let sel = ui.visuals().selection.bg_fill;
+                    frame = frame
+                        .fill(sel.gamma_multiply(0.2))
+                        .stroke(egui::Stroke::new(1.0, sel));
+                }
+                frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(selected, format!("{}", i + 1)).clicked() {
+                            act.select = Some((r.id, r.start));
+                        }
+                        let times = egui::RichText::new(format!(
+                            "{} – {}",
+                            timefmt::display(r.start),
+                            timefmt::display(r.end)
+                        ))
+                        .monospace();
+                        if ui
+                            .add(egui::Label::new(times).sense(egui::Sense::click()))
+                            .on_hover_text("Go to the start of this segment")
+                            .clicked()
+                        {
+                            act.select = Some((r.id, r.start));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            r.remove_button(ui, &mut act);
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(timefmt::display(r.end - r.start)).monospace(),
+                        )
+                        .on_hover_text("Duration");
+                        ui.weak("·");
+                        r.head.label(ui);
+                    });
+                    r.title_edit(ui, f32::INFINITY, &mut act);
+                });
+                ui.add_space(4.0);
+            }
+            if rows.is_empty() {
+                ui.add(egui::Label::new(egui::RichText::new(EMPTY_HINT).weak()).wrap());
+            }
+        });
+        self.apply_segment_actions(act);
+    }
+
+    fn apply_segment_actions(&mut self, act: SegActions) {
         // inline title edit: changes apply as you type; one undo step when the field
         // loses focus (App::commit_title_edit)
-        if title_focus && self.title_before.is_none() {
+        if act.title_focus && self.title_before.is_none() {
             self.title_before = Some(self.project.clips.clone());
         }
-        if let Some((sid, text)) = title_change
+        if let Some((sid, text)) = act.title_change
             && let Some(seg) = self
                 .project
                 .clips
@@ -216,13 +298,86 @@ impl App {
             seg.chapter_title = (!text.trim().is_empty()).then_some(text);
             self.mark_plan_dirty();
         }
-        if let Some((sid, t)) = select {
+        if let Some((sid, t)) = act.select {
             self.selected_seg = Some(sid);
             self.seek(t);
         }
-        if let Some(sid) = delete {
+        if let Some(sid) = act.delete {
             self.selected_seg = Some(sid);
             self.delete_selected_segment();
         }
     }
+}
+
+const EMPTY_HINT: &str =
+    "Nothing kept from this clip. Use Set start (I) / Set end (O) to keep a part.";
+
+/// One segment in the list.
+struct SegRow {
+    id: uuid::Uuid,
+    start: f64,
+    end: f64,
+    head: Head,
+    title: String,
+    /// The default chapter title, shown when the title is empty.
+    hint: String,
+}
+
+/// How the segment's first frames are exported.
+enum Head {
+    /// Starts on a keyframe: copied.
+    Copied,
+    /// Re-encoded up to the next keyframe, this many seconds in.
+    Reencodes(f64),
+    /// No keyframe inside: re-encoded as a whole.
+    Reencoded,
+}
+
+impl Head {
+    fn label(&self, ui: &mut egui::Ui) {
+        let warn = ui.visuals().warn_fg_color;
+        match self {
+            Head::Copied => ui.label("keyframe: copied"),
+            Head::Reencodes(h) => ui.colored_label(warn, format!("re-encodes {h:.1} s")),
+            Head::Reencoded => ui.colored_label(warn, "re-encoded"),
+        };
+    }
+}
+
+impl SegRow {
+    fn title_edit(&self, ui: &mut egui::Ui, width: f32, act: &mut SegActions) {
+        let mut text = self.title.clone();
+        let r = ui
+            .add(
+                egui::TextEdit::singleline(&mut text)
+                    .hint_text(self.hint.as_str())
+                    .desired_width(width),
+            )
+            .on_hover_text(
+                "Title of this segment's chapter (per-segment chapters). Empty: the default shown.",
+            );
+        act.title_focus |= r.gained_focus();
+        if r.changed() {
+            act.title_change = Some((self.id, text));
+        }
+    }
+
+    fn remove_button(&self, ui: &mut egui::Ui, act: &mut SegActions) {
+        if ui
+            .small_button("Remove")
+            .on_hover_text("Delete this segment")
+            .clicked()
+        {
+            act.delete = Some(self.id);
+        }
+    }
+}
+
+/// What the user did in the segment list this frame.
+#[derive(Default)]
+struct SegActions {
+    select: Option<(uuid::Uuid, f64)>,
+    delete: Option<uuid::Uuid>,
+    title_change: Option<(uuid::Uuid, String)>,
+    title_focus: bool,
 }

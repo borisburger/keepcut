@@ -9,7 +9,7 @@ use keepcut_core::ffmpeg::Tools;
 use keepcut_core::fsutil;
 
 use crate::app::{App, ProbeState};
-use crate::config::{RenderPath, Theme};
+use crate::config::{HwDecoding, RenderPath, Theme};
 
 #[derive(Default)]
 pub struct SettingsUi {
@@ -201,6 +201,22 @@ impl App {
                         ui.radio_value(&mut self.config.render, RenderPath::Software, "Software");
                     });
                     ui.weak("Takes effect after a restart. Software is slower; use it if the video stays black.");
+                });
+                ui.end_row();
+
+                ui.label("Hardware decoding");
+                ui.vertical(|ui| {
+                    let before = self.config.hw_decoding;
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.config.hw_decoding, HwDecoding::Auto, "Automatic")
+                            .on_hover_text("The GPU decodes the preview where mpv considers it safe");
+                        ui.radio_value(&mut self.config.hw_decoding, HwDecoding::Off, "Off (CPU)")
+                            .on_hover_text("The CPU decodes the preview; exports are not affected");
+                    });
+                    if self.config.hw_decoding != before {
+                        self.apply_hw_decoding();
+                    }
+                    ui.weak("Turn off if the preview shows black lines or blocks. Applies at once.");
                 });
                 ui.end_row();
 

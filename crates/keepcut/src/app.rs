@@ -129,6 +129,15 @@ pub struct App {
     pub title_dialog: Option<crate::clips::TitleDialog>,
     /// Clip list before an inline segment-title edit (one undo step per edit).
     pub title_before: Option<Vec<Clip>>,
+    /// The GPU that draws the window (and the preview on the OpenGL path).
+    pub gpu: Option<GpuInfo>,
+    /// The segment list is shown beside the video instead of under the timeline (a
+    /// narrow video, e.g. portrait, leaves room at its side).
+    pub segments_beside: bool,
+    /// Height of the editor panel without the segment list, and of the list under the
+    /// timeline (last frame), to decide whether the list fits beside the video.
+    pub editor_base_height: f32,
+    pub editor_list_height: f32,
     pub proj: crate::project::ProjectState,
     pub settings: crate::settings::SettingsUi,
     pub ctx: egui::Context,
@@ -146,7 +155,27 @@ impl App {
         } else {
             RenderKind::Gl
         };
-        let mut player = Player::new(kind, None, cc.egui_ctx.clone())?;
+        let hwdec = config.hw_decoding.mpv_override();
+        // which GPU and driver draw the preview (hybrid laptops: Intel or NVIDIA), for
+        // diagnosing display problems (docs/preview-artifacts.md)
+        let mut gpu = None;
+        if let Some(gl) = &cc.gl {
+            use glow::HasContext as _;
+            let (vendor, renderer, version) = unsafe {
+                (
+                    gl.get_parameter_string(glow::VENDOR),
+                    gl.get_parameter_string(glow::RENDERER),
+                    gl.get_parameter_string(glow::VERSION),
+                )
+            };
+            tracing::info!("OpenGL: {renderer} ({vendor}), {version}");
+            gpu = Some(GpuInfo {
+                renderer,
+                vendor,
+                version,
+            });
+        }
+        let mut player = Player::new(kind, hwdec, cc.egui_ctx.clone())?;
         let renderer = match (kind, cc.gl.clone(), cc.get_proc_address.clone()) {
             (RenderKind::Gl, Some(gl), Some(gp)) => {
                 match GlRenderer::new(&player.mpv, gl, gp, cc.egui_ctx.clone()) {
@@ -155,7 +184,7 @@ impl App {
                         tracing::warn!("OpenGL video path failed ({e}); using the software path");
                         kind = RenderKind::Sw;
                         drop(player);
-                        player = Player::new(kind, None, cc.egui_ctx.clone())?;
+                        player = Player::new(kind, hwdec, cc.egui_ctx.clone())?;
                         Renderer::Sw(SwRenderer::new(&player.mpv, cc.egui_ctx.clone())?)
                     }
                 }
@@ -215,6 +244,10 @@ impl App {
             script: None,
             title_dialog: None,
             title_before: None,
+            gpu,
+            segments_beside: false,
+            editor_base_height: 110.0,
+            editor_list_height: 0.0,
             proj: Default::default(),
             settings: Default::default(),
             ctx: cc.egui_ctx.clone(),
@@ -680,6 +713,16 @@ impl App {
         self.loaded = Loaded::Preview { clip, spans };
     }
 
+    /// Applies the hardware decoding setting to mpv right away (it re-creates the decoder).
+    pub fn apply_hw_decoding(&mut self) {
+        let v = self
+            .config
+            .hw_decoding
+            .mpv_override()
+            .unwrap_or(player::default_hwdec(self.render_kind));
+        self.player.command("set", &["hwdec", v]);
+    }
+
     /// Starts "Preview all" again from the beginning (e.g. after a soundtrack change).
     pub fn restart_preview_all(&mut self) {
         self.load_preview(None);
@@ -846,6 +889,10 @@ impl App {
                     }
                 }
                 PlayerEvent::PlaybackRestart => self.seek_target = None,
+                // logged for diagnosing display problems (docs/preview-artifacts.md)
+                PlayerEvent::Prop("hwdec-current", player::Value::Str(h)) if !h.is_empty() => {
+                    tracing::info!("preview decoding: {h}");
+                }
                 PlayerEvent::FileLoaded => {
                     if let Some(url) = self.pending_soundtrack.take()
                         && matches!(self.loaded, Loaded::Preview { clip: None, .. })
@@ -1160,6 +1207,23 @@ impl App {
                 ui.label(&self.status);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // which GPU draws (hybrid laptops: the integrated or the dedicated one)
+                if let Some(gpu) = &self.gpu {
+                    ui.weak(format!("GPU: {}", gpu.short_name())).on_hover_text(format!(
+                        "The GPU that draws Keepcut's window{}.\n{} ({}), OpenGL {}\n\n\
+                         On a laptop with two GPUs, the graphics settings of Windows or \
+                         of the GPU's driver choose which one Keepcut uses.",
+                        if self.render_kind == RenderKind::Gl {
+                            " and the video preview"
+                        } else {
+                            ""
+                        },
+                        gpu.renderer,
+                        gpu.vendor,
+                        gpu.version
+                    ));
+                    ui.separator();
+                }
                 ui.weak(format!(
                     "video: {} · hwdec {}",
                     if self.render_kind == RenderKind::Gl {
@@ -1175,6 +1239,24 @@ impl App {
                 ));
             });
         });
+    }
+
+    /// Width / height of the video as displayed (16:9 until it is known).
+    fn video_aspect(&self) -> f32 {
+        let ds = self.player.state.dsize;
+        if ds[0] > 0 && ds[1] > 0 {
+            ds[0] as f32 / ds[1] as f32
+        } else {
+            16.0 / 9.0
+        }
+    }
+
+    /// Whether there is a segment list to show: a clip that has been read is selected.
+    fn segment_list_shown(&self) -> bool {
+        !matches!(self.loaded, Loaded::Nothing)
+            && self
+                .selected
+                .is_some_and(|id| self.info(id).is_some() && self.probe_error(id).is_none())
     }
 
     fn video(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -1204,12 +1286,7 @@ impl App {
             );
             return;
         }
-        let ds = self.player.state.dsize;
-        let aspect = if ds[0] > 0 && ds[1] > 0 {
-            ds[0] as f32 / ds[1] as f32
-        } else {
-            16.0 / 9.0
-        };
+        let aspect = self.video_aspect();
         let mut size = avail.size();
         if size.x / size.y.max(1.0) > aspect {
             size.x = size.y * aspect;
@@ -1313,6 +1390,41 @@ impl App {
         if modal.inner || modal.should_close() {
             self.portal_notice = false;
         }
+    }
+}
+
+/// Narrowest the segment list beside the video may be.
+const SEGMENTS_BESIDE_MIN_WIDTH: f32 = 280.0;
+/// Space between the video and the segment list beside it.
+const SEGMENTS_BESIDE_GAP: f32 = 12.0;
+
+/// Whether the segment list fits beside the video, when `area` holds the video and the
+/// editor under it, the editor without the list is `editor_height` tall, and the video
+/// is `aspect` (width / height).
+fn segments_fit_beside(area: egui::Vec2, editor_height: f32, aspect: f32) -> bool {
+    let video_height = (area.y - editor_height).max(1.0);
+    let video_width = (video_height * aspect).min(area.x);
+    area.x - video_width - SEGMENTS_BESIDE_GAP >= SEGMENTS_BESIDE_MIN_WIDTH
+}
+
+/// The OpenGL driver's description of the GPU.
+#[derive(Debug, Clone)]
+pub struct GpuInfo {
+    pub renderer: String,
+    pub vendor: String,
+    pub version: String,
+}
+
+impl GpuInfo {
+    /// The GPU's name without trademark signs and bus details: "Intel(R) Iris(R) Xe
+    /// Graphics" → "Intel Iris Xe Graphics", "NVIDIA GeForce RTX 4060 Laptop
+    /// GPU/PCIe/SSE2" → "NVIDIA GeForce RTX 4060 Laptop GPU".
+    pub fn short_name(&self) -> String {
+        let name = self.renderer.split('/').next().unwrap_or(&self.renderer);
+        let name = ["(R)", "(r)", "(TM)", "(tm)", "®", "™"]
+            .iter()
+            .fold(name.to_string(), |n, mark| n.replace(mark, ""));
+        name.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 }
 
@@ -1436,15 +1548,48 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 self.clip_list(ui);
             });
-        egui::Panel::bottom("editor")
+        // a narrow (portrait) video leaves room at its side: the segment list goes there
+        // instead of under the timeline. Decided from the editor's height without the
+        // list, so moving the list doesn't change the decision.
+        let rest = ui.available_rect_before_wrap();
+        let beside = self.segment_list_shown()
+            && segments_fit_beside(rest.size(), self.editor_base_height, self.video_aspect());
+        if beside != self.segments_beside {
+            self.segments_beside = beside;
+            ctx.request_repaint();
+        }
+        let editor = egui::Panel::bottom("editor")
             .resizable(false)
             .show(ui, |ui| {
                 self.editor(ui);
             });
+        self.editor_base_height = editor.response.rect.height()
+            - if self.segments_beside {
+                0.0
+            } else {
+                self.editor_list_height
+            };
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                self.video(ui, frame);
+                if self.segments_beside {
+                    let avail = ui.available_rect_before_wrap();
+                    let w = (avail.height() * self.video_aspect()).min(avail.width());
+                    let (video, side) = avail.split_left_right_at_x(avail.left() + w);
+                    ui.painter()
+                        .rect_filled(side, 0.0, ui.visuals().panel_fill);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(video), |ui| {
+                        self.video(ui, frame);
+                    });
+                    let side = side
+                        .with_min_x(side.left() + SEGMENTS_BESIDE_GAP)
+                        .shrink2(egui::vec2(4.0, 6.0));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(side), |ui| {
+                        self.segment_cards(ui);
+                    });
+                } else {
+                    self.video(ui, frame);
+                }
             });
         self.log_panel(&ctx);
         self.export_window(&ctx);
@@ -1480,5 +1625,48 @@ mod window_tests {
         assert!(near(size(2560.0, 1440.0), egui::vec2(1600.0, 1000.0)));
         // tiny monitors: never below the minimum window size
         assert!(near(size(1024.0, 600.0), egui::vec2(900.0, 600.0)));
+    }
+
+    #[test]
+    fn gpu_names_are_shortened() {
+        let name = |r: &str| {
+            GpuInfo {
+                renderer: r.into(),
+                vendor: String::new(),
+                version: String::new(),
+            }
+            .short_name()
+        };
+        assert_eq!(name("Intel(R) Iris(R) Xe Graphics"), "Intel Iris Xe Graphics");
+        assert_eq!(
+            name("NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2"),
+            "NVIDIA GeForce RTX 4060 Laptop GPU"
+        );
+        assert_eq!(
+            name("AMD Radeon(TM) Graphics"),
+            "AMD Radeon Graphics"
+        );
+    }
+
+    #[test]
+    fn segments_go_beside_a_narrow_video() {
+        // portrait video in a wide area: room beside it
+        assert!(segments_fit_beside(
+            egui::vec2(980.0, 740.0),
+            110.0,
+            9.0 / 16.0
+        ));
+        // landscape video: no room
+        assert!(!segments_fit_beside(
+            egui::vec2(980.0, 740.0),
+            110.0,
+            16.0 / 9.0
+        ));
+        // portrait video in a narrow area: no room
+        assert!(!segments_fit_beside(
+            egui::vec2(600.0, 740.0),
+            110.0,
+            9.0 / 16.0
+        ));
     }
 }

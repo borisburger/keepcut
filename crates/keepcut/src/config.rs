@@ -26,6 +26,27 @@ pub enum RenderPath {
     Software,
 }
 
+/// Video decoding in the preview (mpv's `hwdec`); exports are not affected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HwDecoding {
+    /// The GPU's decoder where mpv considers it safe, else the CPU.
+    #[default]
+    Auto,
+    /// Always the CPU (a fallback for display problems such as black lines or blocks).
+    Off,
+}
+
+impl HwDecoding {
+    /// The `hwdec` value to give mpv instead of its default (`None`: the default).
+    pub fn mpv_override(self) -> Option<&'static str> {
+        match self {
+            HwDecoding::Auto => None,
+            HwDecoding::Off => Some("no"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -46,6 +67,7 @@ pub struct Config {
     pub loudness_target: f64,
     pub chapters: Chapters,
     pub render: RenderPath,
+    pub hw_decoding: HwDecoding,
     /// Folder with ffmpeg and ffprobe (`None`: bundled next to Keepcut, then PATH).
     pub ffmpeg_dir: Option<PathBuf>,
     /// Parent of the export temp folders (`None`: the system temp folder).
@@ -90,6 +112,7 @@ impl Default for Config {
             loudness_target: -14.0,
             chapters: Chapters::None,
             render: RenderPath::Auto,
+            hw_decoding: HwDecoding::Auto,
             ffmpeg_dir: None,
             temp_dir: None,
             full_decode_check: false,
