@@ -82,6 +82,9 @@ pub struct SegmentPlan {
     /// Absolute indices of the audio streams to mix; empty = silence.
     pub audio_streams: Vec<u32>,
     pub chapter_title: String,
+    /// Chapter title of the source clip (per-clip chapters).
+    #[serde(default)]
+    pub clip_title: String,
 }
 
 impl SegmentPlan {
@@ -411,14 +414,18 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
                 AudioTracks::FirstOnly => info.audio.iter().take(1).map(|a| a.index).collect(),
             };
             let clip = &project.clips[*ci];
-            let stem = clip
-                .chapter_title
-                .clone()
-                .unwrap_or_else(|| info.file_stem());
-            let chapter_title = seg
-                .chapter_title
-                .clone()
-                .unwrap_or_else(|| format!("{stem} – {}", si + 1));
+            // titles are stored as typed in the UI
+            let trimmed = |t: &Option<String>| {
+                t.as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+            };
+            let stem = trimmed(&clip.chapter_title).unwrap_or_else(|| info.file_stem());
+            let chapter_title = trimmed(&seg.chapter_title).unwrap_or_else(|| {
+                    let kept = clip.segments.as_ref().map_or(1, Vec::len);
+                    crate::chapters::default_segment_title(&stem, *si, kept)
+                });
             segments.push(SegmentPlan {
                 clip_idx: *ci,
                 seg_idx: *si,
@@ -429,6 +436,7 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
                 pieces,
                 audio_streams,
                 chapter_title,
+                clip_title: stem.clone(),
             });
         }
         // timescale: the common source time base, else 90 kHz; CFR output lets the muxer choose
@@ -1038,6 +1046,45 @@ pub fn concat_escape(path: &str) -> String {
     format!("file:{}", path.replace('\'', "'\\''"))
 }
 
+/// Audio filter of the final mux with loudness normalization (§6.9): a gain per
+/// run of segments, `(output start time, gain dB)` in output order, applied in
+/// float (so nothing clips before the limiter), then the −1 dBFS limiter.
+///
+/// The gain switches on 64-sample frames (1.3 ms), with the boundary placed half
+/// a frame early so rounding can't leave a whole frame on the wrong side.
+/// `latency=1` makes the limiter compensate its look-ahead; without it the audio
+/// would come out 5 ms late.
+pub fn loudness_filter(gains: &[(f64, f64)]) -> String {
+    const HALF_FRAME: f64 = 32.0 / 48000.0;
+    let mut runs: Vec<(f64, f64)> = Vec::new();
+    for &(t, g) in gains {
+        if runs.last().is_none_or(|r| (r.1 - g).abs() > 1e-6) {
+            runs.push((t, g));
+        }
+    }
+    let factor = |g: f64| format!("{:.6}", 10f64.powf(g / 20.0));
+    let expr = if runs.len() <= 1 {
+        factor(runs.first().map_or(0.0, |r| r.1))
+    } else {
+        (0..runs.len())
+            .map(|k| {
+                let mut term = factor(runs[k].1);
+                if k > 0 {
+                    term += &format!("*gte(t,{:.6})", runs[k].0 - HALF_FRAME);
+                }
+                if let Some(next) = runs.get(k + 1) {
+                    term += &format!("*lt(t,{:.6})", next.0 - HALF_FRAME);
+                }
+                term
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    };
+    format!(
+        "asetnsamples=n=64:p=0,volume=volume='{expr}':eval=frame,alimiter=limit=0.891:level=disabled:latency=1"
+    )
+}
+
 /// Final mux of an output (§6.7).
 #[allow(clippy::too_many_arguments)]
 pub fn final_mux_cmd(
@@ -1047,7 +1094,7 @@ pub fn final_mux_cmd(
     audio_list: &Path,
     chapters: Option<&Path>,
     audio_bitrate_kbps: u32,
-    limiter: bool,
+    audio_filter: Option<&Path>,
     target: &Path,
 ) -> Cmd {
     let mut c = ffmpeg_base(tools);
@@ -1079,8 +1126,9 @@ pub fn final_mux_cmd(
         r"{extract}setts=pts=PTS:dts=DTS:duration=if(eq(NEXT_DTS\,NOPTS)\,{:.6}/TB-(PTS-STARTPTS)\,DURATION)",
         out.duration()
     ));
-    if limiter {
-        c = c.args(["-af", "alimiter=limit=0.891:level=disabled"]);
+    if let Some(f) = audio_filter {
+        // the graph can be long (one term per gain change): read it from a file
+        c = c.arg("-/af").arg(f);
     }
     if let Some(ts) = out.timescale {
         c = c.arg("-video_track_timescale").arg(ts.to_string());
@@ -1317,5 +1365,16 @@ mod tests {
         );
         let l = concat_list(&[(PathBuf::from("/t/p.ts"), 1.5)]);
         assert!(l.contains("file 'file:/t/p.ts'\nduration 1.500000\n"));
+    }
+
+    #[test]
+    fn loudness_filter_merges_equal_gains() {
+        let f = loudness_filter(&[(0.0, 0.0)]);
+        assert!(f.contains("volume=volume='1.000000':eval=frame"), "{f}");
+        assert!(f.ends_with("alimiter=limit=0.891:level=disabled:latency=1"));
+        // three segments, the first two from one clip (same gain)
+        let f = loudness_filter(&[(0.0, 6.0), (10.0, 6.0), (15.0, -6.0)]);
+        let expr = f.split('\'').nth(1).unwrap();
+        assert_eq!(expr, "1.995262*lt(t,14.999333)+0.501187*gte(t,14.999333)");
     }
 }

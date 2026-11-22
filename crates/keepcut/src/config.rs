@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 
 use keepcut_core::model::{
-    AudioTracks, EncodingMode, ExportSettings, FullEncodeSettings, OutputMode, Quality,
+    AudioTracks, Chapters, EncodingMode, ExportSettings, FullEncodeSettings, Loudness, OutputMode,
+    Quality,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +41,37 @@ pub struct Config {
     pub full: FullEncodeSettings,
     pub audio_tracks: AudioTracks,
     pub audio_bitrate_kbps: u32,
+    pub loudness: Loudness,
+    /// Default loudness target (LUFS), also set in Settings.
+    pub loudness_target: f64,
+    pub chapters: Chapters,
     pub render: RenderPath,
+    /// Folder with ffmpeg and ffprobe (`None`: bundled next to Keepcut, then PATH).
+    pub ffmpeg_dir: Option<PathBuf>,
+    /// Parent of the export temp folders (`None`: the system temp folder).
+    pub temp_dir: Option<PathBuf>,
+    /// Decode every output completely after an export (slow; §6.11).
+    pub full_decode_check: bool,
+    pub theme: Theme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub fn preference(self) -> egui::ThemePreference {
+        match self {
+            Theme::System => egui::ThemePreference::System,
+            Theme::Light => egui::ThemePreference::Light,
+            Theme::Dark => egui::ThemePreference::Dark,
+        }
+    }
 }
 
 impl Default for Config {
@@ -55,7 +86,14 @@ impl Default for Config {
             full: FullEncodeSettings::default(),
             audio_tracks: AudioTracks::MixAll,
             audio_bitrate_kbps: 192,
+            loudness: Loudness::Off,
+            loudness_target: -14.0,
+            chapters: Chapters::None,
             render: RenderPath::Auto,
+            ffmpeg_dir: None,
+            temp_dir: None,
+            full_decode_check: false,
+            theme: Theme::System,
         }
     }
 }
@@ -107,6 +145,9 @@ impl Config {
         x.full = self.full.clone();
         x.audio_tracks = self.audio_tracks;
         x.audio_bitrate_kbps = self.audio_bitrate_kbps;
+        x.loudness = self.loudness;
+        x.loudness_target = self.loudness_target;
+        x.chapters = self.chapters;
     }
 
     /// Remembers the export choices of `x` (saved with the config).
@@ -118,5 +159,8 @@ impl Config {
         self.full = x.full.clone();
         self.audio_tracks = x.audio_tracks;
         self.audio_bitrate_kbps = x.audio_bitrate_kbps;
+        self.loudness = x.loudness;
+        self.loudness_target = x.loudness_target;
+        self.chapters = x.chapters;
     }
 }

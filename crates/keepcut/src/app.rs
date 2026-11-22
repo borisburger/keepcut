@@ -35,6 +35,8 @@ pub enum ProbeState {
     Pending,
     Ready(Arc<MediaInfo>),
     Failed(String),
+    /// The file is gone (a project opened after files moved): relink or remove.
+    Missing,
 }
 
 /// One kept range in an EDL preview: `len` seconds of `clip`/`seg` starting at
@@ -86,6 +88,13 @@ pub struct App {
     /// Playhead to restore when a clip is selected again.
     pub last_pos: HashMap<Uuid, f64>,
     pub probe: ProbeService,
+    pub assets: media::AssetService,
+    /// Clip thumbnails by file (`None`: could not be made).
+    pub thumbs: HashMap<PathBuf, Option<egui::TextureHandle>>,
+    /// Clips added but not yet probed: placed by recording time once probed.
+    pub newly_added: std::collections::HashSet<PathBuf>,
+    /// Waveform peaks by file (`None`: failed; empty: no audio).
+    pub waves: HashMap<PathBuf, Option<Arc<Vec<u8>>>>,
     pub encoders: EncoderSet,
     encoders_rx: Option<Receiver<EncoderSet>>,
     pub history: History<Vec<Clip>>,
@@ -108,12 +117,19 @@ pub struct App {
     seek_target_age: u32,
     /// Test automation (`--script`).
     pub script: Option<crate::script::Script>,
+    pub title_dialog: Option<crate::clips::TitleDialog>,
+    /// Clip list before an inline segment-title edit (one undo step per edit).
+    pub title_before: Option<Vec<Clip>>,
+    pub proj: crate::project::ProjectState,
+    pub settings: crate::settings::SettingsUi,
+    pub ctx: egui::Context,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> anyhow::Result<App> {
         let config = Config::load();
-        let tools = Tools::locate().ok();
+        let tools = crate::settings::locate_tools(config.ffmpeg_dir.as_deref()).ok();
+        cc.egui_ctx.set_theme(config.theme.preference());
         let want_sw = config.render == RenderPath::Software;
         let mut kind = if want_sw {
             RenderKind::Sw
@@ -140,6 +156,7 @@ impl App {
             }
         };
         let probe = ProbeService::new(tools.clone(), cc.egui_ctx.clone());
+        let assets = media::AssetService::new(tools.clone(), cc.egui_ctx.clone());
         let encoders_rx = Some(media::detect_encoders(tools.clone(), cc.egui_ctx.clone()));
         let mut project = Project {
             version: keepcut_core::model::PROJECT_VERSION,
@@ -158,6 +175,10 @@ impl App {
             probes: HashMap::new(),
             last_pos: HashMap::new(),
             probe,
+            assets,
+            thumbs: HashMap::new(),
+            newly_added: Default::default(),
+            waves: HashMap::new(),
             encoders: EncoderSet::software_only(),
             encoders_rx,
             history: History::new(200),
@@ -176,11 +197,22 @@ impl App {
             seek_target: None,
             seek_target_age: 0,
             script: None,
+            title_dialog: None,
+            title_before: None,
+            proj: Default::default(),
+            settings: Default::default(),
+            ctx: cc.egui_ctx.clone(),
         };
         if app.tools.is_none() {
-            app.set_status("ffmpeg/ffprobe not found: install ffmpeg or put it next to Keepcut");
+            app.set_status("ffmpeg/ffprobe not found: install ffmpeg, put it next to Keepcut, or choose its folder in Settings");
         }
-        app.add_files(files);
+        // a project file on the command line opens it; anything else is added as clips
+        let (projects, clips): (Vec<PathBuf>, Vec<PathBuf>) =
+            files.into_iter().partition(|f| is_project_file(f));
+        if let Some(p) = projects.first() {
+            app.open_project(p);
+        }
+        app.add_files(clips);
         Ok(app)
     }
 
@@ -216,6 +248,7 @@ impl App {
                 self.probes.insert(f.clone(), ProbeState::Pending);
                 self.probe.enqueue(f.clone());
             }
+            self.newly_added.insert(f.clone());
             self.sort_new_clip(&f);
             added += 1;
         }
@@ -230,6 +263,16 @@ impl App {
     }
 
     fn on_probed(&mut self, path: PathBuf, r: Result<Arc<MediaInfo>, String>) {
+        if let Ok(info) = &r {
+            self.check_changed_source(&path, info);
+            // thumbnail and waveform, once per file (a re-probe after a change asks again)
+            self.thumbs.remove(&path);
+            self.waves.remove(&path);
+            self.assets.request(info.clone());
+            if self.clip_path(self.selected) == Some(&path) {
+                self.assets.prioritize_wave(&path);
+            }
+        }
         self.probes.insert(
             path.clone(),
             match r {
@@ -238,13 +281,17 @@ impl App {
             },
         );
         self.fill_whole_clip_segments();
-        self.sort_new_clip(&path);
+        // only clips added just now are placed by recording time; an opened
+        // project keeps its order
+        if self.newly_added.remove(&path) {
+            self.sort_new_clip(&path);
+        }
         self.plan_dirty = true;
     }
 
     /// Clips whose segments are `None` ("whole clip", e.g. not yet probed when
     /// added, or restored by undo) get one real segment once their file is probed.
-    fn fill_whole_clip_segments(&mut self) {
+    pub fn fill_whole_clip_segments(&mut self) {
         for c in &mut self.project.clips {
             if let Some(ProbeState::Ready(info)) = self.probes.get(&c.path) {
                 c.file_size = info.file_size;
@@ -263,6 +310,7 @@ impl App {
     pub fn probe_error(&self, id: Uuid) -> Option<String> {
         match self.probe_state(id)? {
             ProbeState::Failed(e) => Some(e.clone()),
+            ProbeState::Missing => Some("file not found (right-click the clip: Locate…)".into()),
             _ => None,
         }
     }
@@ -280,7 +328,12 @@ impl App {
         self.project
             .clips
             .iter()
-            .filter(|c| matches!(self.probes.get(&c.path), Some(ProbeState::Failed(_))))
+            .filter(|c| {
+                matches!(
+                    self.probes.get(&c.path),
+                    Some(ProbeState::Failed(_) | ProbeState::Missing)
+                )
+            })
             .count()
     }
 
@@ -321,6 +374,35 @@ impl App {
             self.history.push(before);
             self.project.clips = clips;
             self.plan_dirty = true;
+        }
+    }
+
+    pub fn clip_path(&self, id: Option<Uuid>) -> Option<&PathBuf> {
+        self.clip(id?).map(|c| &c.path)
+    }
+
+    fn on_asset(&mut self, ctx: &egui::Context, r: media::AssetResult) {
+        use keepcut_core::assets::{THUMB_H, THUMB_W};
+        match r {
+            media::AssetResult::Thumb(path, data) => {
+                let tex = data
+                    .filter(|d| d.len() == (THUMB_W * THUMB_H * 4) as usize)
+                    .map(|d| {
+                        let img = egui::ColorImage::from_rgba_unmultiplied(
+                            [THUMB_W as usize, THUMB_H as usize],
+                            &d,
+                        );
+                        ctx.load_texture(
+                            format!("thumb:{}", path.display()),
+                            img,
+                            egui::TextureOptions::LINEAR,
+                        )
+                    });
+                self.thumbs.insert(path, tex);
+            }
+            media::AssetResult::Wave(path, data) => {
+                self.waves.insert(path, data);
+            }
         }
     }
 
@@ -484,6 +566,9 @@ impl App {
             self.timeline = TimelineView::default();
         }
         self.selected = id;
+        if let Some(p) = self.clip_path(id).cloned() {
+            self.assets.prioritize_wave(&p);
+        }
         self.reload_selected();
     }
 
@@ -778,6 +863,13 @@ impl App {
             .collect()
     }
 
+    /// Runs the encoder detection again (Settings).
+    pub fn redetect_encoders(&mut self) {
+        self.encoders = EncoderSet::software_only();
+        self.encoders_rx = Some(media::detect_encoders(self.tools.clone(), self.ctx.clone()));
+        self.plan_dirty = true;
+    }
+
     /// The hardware encoder test (startup) has finished.
     pub fn encoders_detected(&self) -> bool {
         self.encoders_rx.is_none()
@@ -801,11 +893,23 @@ impl App {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
         // no shortcuts while typing, in a dialog, or while dragging a segment edge
-        if ctx.egui_wants_keyboard_input() || self.export.is_modal_open() || self.drag.is_some() {
+        if ctx.egui_wants_keyboard_input() || self.dialog_open() || self.drag.is_some() {
             return;
         }
         let ev = |k: Key, m: Modifiers| ctx.input_mut(|i| i.consume_key(m, k));
         let (none, shift, cmd) = (Modifiers::NONE, Modifiers::SHIFT, Modifiers::COMMAND);
+        if ev(Key::S, cmd | shift) {
+            self.save_as();
+        }
+        if ev(Key::S, cmd) {
+            self.save();
+        }
+        if ev(Key::O, cmd) {
+            self.request(crate::project::After::Open(None));
+        }
+        if ev(Key::N, cmd) {
+            self.request(crate::project::After::New);
+        }
         if ev(Key::Z, cmd | shift) || ev(Key::Y, cmd) {
             self.redo();
         }
@@ -895,6 +999,32 @@ impl App {
             {
                 self.add_files(files);
             }
+            ui.menu_button("Project", |ui| {
+                use crate::project::After;
+                let item = |ui: &mut egui::Ui, text: &str, keys: &str| {
+                    ui.add(egui::Button::new(text).shortcut_text(keys)).clicked()
+                };
+                if item(ui, "New", "Ctrl+N") {
+                    self.request(After::New);
+                }
+                if item(ui, "Open…", "Ctrl+O") {
+                    self.request(After::Open(None));
+                }
+                if item(ui, "Save", "Ctrl+S") {
+                    self.save();
+                }
+                if item(ui, "Save as…", "Ctrl+Shift+S") {
+                    self.save_as();
+                }
+                if self.missing_count() > 0 {
+                    ui.separator();
+                    if ui.button("Missing files…").clicked() {
+                        self.proj.relink_open = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Save the clips and their segments to continue later");
             ui.separator();
             let all_on = matches!(self.loaded, Loaded::Preview { clip: None, .. });
             if ui
@@ -938,6 +1068,9 @@ impl App {
                     .clicked()
                 {
                     self.export.toggle_log_panel();
+                }
+                if ui.button("Settings").clicked() {
+                    self.open_settings();
                 }
             });
         });
@@ -1089,10 +1222,31 @@ impl App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        if !files.is_empty() {
-            self.add_files(files);
+        // a dropped project file opens it (asking to save first); videos are added
+        let (projects, clips): (Vec<PathBuf>, Vec<PathBuf>) =
+            files.into_iter().partition(|f| is_project_file(f));
+        if let Some(p) = projects.into_iter().next() {
+            self.request(crate::project::After::Open(Some(p)));
+        }
+        if !clips.is_empty() {
+            self.add_files(clips);
         }
     }
+
+    /// Any dialog that takes the keyboard (shortcuts are off while it is open).
+    fn dialog_open(&self) -> bool {
+        self.export.is_modal_open()
+            || self.title_dialog.is_some()
+            || self.proj.prompt.is_some()
+            || self.proj.recovery.is_some()
+            || self.proj.relink_open
+            || self.settings_open()
+    }
+}
+
+fn is_project_file(p: &std::path::Path) -> bool {
+    p.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(keepcut_core::projfile::EXTENSION))
 }
 
 impl eframe::App for App {
@@ -1101,6 +1255,7 @@ impl eframe::App for App {
         self.cancel_export_and_wait();
         // free the render context while the GL context is current, before the mpv handle
         self.renderer = None;
+        self.project_on_exit();
         // scripted test runs must not change the user's settings
         if self.script.is_none() {
             self.config.remember_export(&self.project.export);
@@ -1113,6 +1268,9 @@ impl eframe::App for App {
         while let Ok((path, r)) = self.probe.results.try_recv() {
             self.on_probed(path, r);
         }
+        while let Ok(r) = self.assets.results.try_recv() {
+            self.on_asset(&ctx, r);
+        }
         if let Some(rx) = &self.encoders_rx
             && let Ok(set) = rx.try_recv()
         {
@@ -1121,6 +1279,7 @@ impl eframe::App for App {
             self.plan_dirty = true;
         }
         self.handle_player_events();
+        self.project_tick(&ctx);
         self.drop_files(&ctx);
         self.shortcuts(&ctx);
         self.run_script(&ctx);
@@ -1152,6 +1311,10 @@ impl eframe::App for App {
             });
         self.log_panel(&ctx);
         self.export_window(&ctx);
+        self.title_window(&ctx);
+        self.commit_title_edit(&ctx);
+        self.project_dialogs(&ctx);
+        self.settings_window(&ctx);
         self.flush_seek();
 
         if let Some(Renderer::Gl(r)) = &self.renderer {

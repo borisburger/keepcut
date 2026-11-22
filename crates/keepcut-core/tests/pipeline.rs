@@ -11,7 +11,8 @@ use keepcut_core::encoders::EncoderSet;
 use keepcut_core::exec::{self, ExecOptions};
 use keepcut_core::ffmpeg::{self, CancelToken, LogSink, RunOpts, Tools};
 use keepcut_core::model::{
-    Clip, EncodingMode, ExportSettings, OutputMode, Project, Quality, Resolution, Segment, VideoCodec,
+    Chapters, Clip, EncodingMode, ExportSettings, Loudness, OutputMode, Project, Quality, Resolution,
+    Segment, VideoCodec,
 };
 use keepcut_core::plan::{self, PieceKind};
 use keepcut_core::probe::{self, MediaInfo};
@@ -421,6 +422,90 @@ fn no_audio_and_two_audio_tracks() {
         vec![clip(&silent, &[(0.4, 3.0)]), clip(&two, &[(1.3, 5.5)])],
         EncodingMode::Smart,
     );
+}
+
+/// Integrated loudness of `[start, start + dur)` of a file.
+fn lufs(t: &Tools, file: &Path, start: f64, dur: f64) -> f64 {
+    let cmd = t
+        .ffmpeg()
+        .args(["-hide_banner", "-nostdin", "-ss"])
+        .arg(format!("{start}"))
+        .arg("-t")
+        .arg(format!("{dur}"))
+        .arg("-i")
+        .arg(file)
+        .args(["-af", "ebur128=framelog=quiet", "-f", "null", "-"]);
+    let o = ffmpeg::run_checked(&cmd, RunOpts::default()).unwrap();
+    exec::parse_ebur128(&o.stderr).unwrap()
+}
+
+#[test]
+fn loudness_per_clip_and_chapters() {
+    let Some(t) = tools() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let enc = ["-t", "8", "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-g", "30", "-c:a", "aac", "-b:a", "192k"];
+    let tone = |name: &str, db: i32| {
+        let src = format!("sine=f=440:r=48000,volume={db}dB");
+        make_clip(&t, dir.path(), name, &["-f", "lavfi", "-i", "testsrc2=s=640x360:r=15", "-f", "lavfi", "-i", &src], &enc)
+    };
+    let quiet = tone("quiet.mp4", -14);
+    let loud = tone("loud.mp4", 10);
+    let mut first = clip(&quiet, &[(0.0, 3.0), (4.0, 7.0)]);
+    first.chapter_title = Some("Intro".into());
+    let clips = vec![first, clip(&loud, &[(1.0, 6.0)])];
+    let settings = ExportSettings {
+        output_dir: Some(dir.path().to_path_buf()),
+        loudness: Loudness::PerClip,
+        loudness_target: -16.0,
+        chapters: Chapters::PerClip,
+        ..Default::default()
+    };
+    let before = (lufs(&t, &quiet, 0.0, 8.0), lufs(&t, &loud, 0.0, 8.0));
+    assert!(before.0 < -28.0 && before.1 > -13.0, "test tones: {before:?}");
+    let (_, paths) = export_with(&t, clips, settings);
+    let out = &paths[0];
+    // each clip's part lands near the target (the limiter only touches peaks)
+    let (a, b) = (lufs(&t, out, 0.2, 5.6), lufs(&t, out, 6.2, 4.6));
+    assert!((a + 16.0).abs() < 1.0, "quiet clip: {a} LUFS");
+    assert!((b + 16.0).abs() < 1.0, "loud clip: {b} LUFS");
+    // chapters: one per clip, the first with its custom title
+    let cmd = t
+        .ffprobe()
+        .args(["-v", "error", "-show_entries", "chapter=start_time,end_time:chapter_tags=title", "-of", "csv=p=0"])
+        .arg(out);
+    let o = ffmpeg::run_checked(&cmd, RunOpts::default()).unwrap();
+    let lines: Vec<String> = String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect();
+    assert_eq!(lines, ["0.000000,6.000000,Intro", "6.000000,11.000000,loud"], "{lines:?}");
+}
+
+#[test]
+fn thumbnail_and_waveform() {
+    use keepcut_core::assets;
+    let Some(t) = tools() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    // 2 s of silence, then a tone; two audio tracks (mixed for the waveform)
+    let a = make_clip(
+        &t,
+        dir.path(),
+        "w.mp4",
+        &[
+            "-f", "lavfi", "-i", "testsrc2=s=320x240:r=15",
+            "-f", "lavfi", "-i", "aevalsrc='if(gte(t,2),0.5*sin(2*PI*440*t),0)':s=48000",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+        ],
+        &["-t", "4", "-map", "0", "-map", "1", "-map", "2", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-c:a", "aac"],
+    );
+    let info = probe::probe(&t, &a, None, None).unwrap();
+    let rgba = assets::thumbnail(&t, &info).unwrap();
+    assert_eq!(rgba.len(), (assets::THUMB_W * assets::THUMB_H * 4) as usize);
+    // 4:3 in 16:9: black bars left and right, picture in the middle
+    assert_eq!(&rgba[..3], &[0, 0, 0]);
+    let mid = ((assets::THUMB_H / 2 * assets::THUMB_W + assets::THUMB_W / 2) * 4) as usize;
+    assert!(rgba[mid..mid + 3].iter().any(|&c| c > 20), "picture in the middle");
+    let peaks = assets::waveform(&t, &info, &CancelToken::new()).unwrap();
+    assert!((395..=405).contains(&peaks.len()), "4 s at 100/s: {}", peaks.len());
+    assert!(peaks[20..180].iter().all(|&p| p < 3), "silence first");
+    assert!(peaks[220..380].iter().all(|&p| p > 100), "then the tone (0.5 ≈ 127)");
 }
 
 /// Runs every `samples/projects/*.json` in both modes (local corpus; slow).

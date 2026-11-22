@@ -34,6 +34,32 @@ impl Tools {
         })
     }
 
+    /// ffmpeg and ffprobe from one folder (a user-chosen location).
+    pub fn in_dir(dir: &Path) -> Result<Tools> {
+        let pick = |name: &'static str| {
+            let p = dir.join(exe_name(name));
+            if p.is_file() {
+                Ok(p)
+            } else {
+                Err(Error::ToolNotFound(name))
+            }
+        };
+        Ok(Tools {
+            ffmpeg: pick("ffmpeg")?,
+            ffprobe: pick("ffprobe")?,
+        })
+    }
+
+    /// The version line of ffmpeg (`ffmpeg version 9.0.2-…`), or the error.
+    pub fn version(&self) -> std::result::Result<String, String> {
+        let o = run(&self.ffmpeg().arg("-version"), RunOpts::default()).map_err(|e| e.to_string())?;
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .next()
+            .map(|l| l.split(" Copyright").next().unwrap_or(l).to_string())
+            .ok_or_else(|| "no output".into())
+    }
+
     pub fn ffmpeg(&self) -> Cmd {
         Cmd::new(&self.ffmpeg)
     }
@@ -174,6 +200,28 @@ impl RunOutput {
     pub fn success(&self) -> bool {
         self.code == Some(0)
     }
+}
+
+/// Starts `cmd` with stdout piped for streaming (stdin and stderr closed), for
+/// outputs too large to collect, such as decoded audio.
+pub fn spawn_stdout(cmd: &Cmd) -> Result<Child> {
+    tracing::debug!("spawn: {}", cmd.display());
+    let mut command = Command::new(&cmd.program);
+    command
+        .args(&cmd.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.spawn().map_err(|source| Error::Spawn {
+        program: cmd.program.to_string_lossy().into_owned(),
+        source,
+    })
 }
 
 /// Runs `cmd` to completion. Returns `Err(Cancelled)` if cancelled; a non-zero

@@ -10,7 +10,9 @@ mod config;
 mod editor;
 mod export;
 mod media;
+mod project;
 mod script;
+mod settings;
 mod timeline;
 
 use std::path::PathBuf;

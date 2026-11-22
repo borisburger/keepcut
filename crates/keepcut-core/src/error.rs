@@ -21,6 +21,9 @@ pub enum Error {
     Probe { path: PathBuf, msg: String },
     #[error("cannot plan export: {0}")]
     Plan(String),
+    /// A project file that can't be read.
+    #[error("{0}")]
+    Project(String),
     /// Not enough disk space (message says where and how much).
     #[error("{0}")]
     NoSpace(String),

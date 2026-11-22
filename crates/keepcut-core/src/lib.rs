@@ -1,6 +1,7 @@
 //! Keepcut core: probing, smart-cut planning and export through the ffmpeg CLI.
 //! No UI dependencies.
 
+pub mod assets;
 pub mod chapters;
 pub mod compat;
 pub mod edit;
@@ -12,6 +13,7 @@ pub mod fsutil;
 pub mod history;
 pub mod model;
 pub mod plan;
+pub mod projfile;
 pub mod probe;
 pub mod timefmt;
 pub mod verify;

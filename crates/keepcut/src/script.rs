@@ -8,7 +8,9 @@
 //! preview-all · toggle-clip N · move-clip FROM TO · sleep SECS · screenshot PATH ·
 //! encoding smart|full · output-dir PATH · output-name NAME · open-export ·
 //! close-export · export · wait-export · print-state · quit ·
-//! set KEY VALUE (export options, see `set_export_option`) · wait-encoders · log-panel
+//! set KEY VALUE (export options, see `set_export_option`) · wait-encoders · log-panel ·
+//! clip-title N TEXT · seg-title N TEXT (selected clip) · print-youtube ·
+//! save PATH · open PATH · new · relink N PATH · settings · show-save-prompt · close-dialogs
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -232,6 +234,87 @@ impl App {
                     self.mark_plan_dirty();
                     true
                 }
+                "clip-title" => {
+                    // clip-title N TEXT: through the Chapter title dialog's code path
+                    let (n, text) = arg.split_once(' ').unwrap_or((arg, ""));
+                    if let Some(c) = n.parse::<usize>().ok().and_then(|i| self.project.clips.get(i)) {
+                        self.title_dialog = Some(crate::clips::TitleDialog {
+                            clip: c.id,
+                            text: text.to_string(),
+                            focus: false,
+                        });
+                        self.apply_title_dialog();
+                    }
+                    true
+                }
+                "seg-title" => {
+                    // seg-title N TEXT: segment N of the selected clip (one undo step)
+                    let (n, text) = arg.split_once(' ').unwrap_or((arg, ""));
+                    let n: usize = n.parse().unwrap_or(0);
+                    if let Some(id) = self.selected {
+                        self.edit(|clips| {
+                            let Some(s) = clips
+                                .iter_mut()
+                                .find(|c| c.id == id)
+                                .and_then(|c| c.segments.as_mut())
+                                .and_then(|s| s.get_mut(n))
+                            else {
+                                return false;
+                            };
+                            s.chapter_title = (!text.trim().is_empty()).then(|| text.to_string());
+                            true
+                        });
+                    }
+                    true
+                }
+                "save" => {
+                    // save PATH (Save as without the file dialog)
+                    let ok = self.save_to(std::path::Path::new(arg));
+                    out(format!("save: {ok}"));
+                    true
+                }
+                "open" => {
+                    self.open_project(std::path::Path::new(arg));
+                    true
+                }
+                "new" => {
+                    self.new_project();
+                    true
+                }
+                "relink" => {
+                    // relink N PATH (Locate… without the file dialog)
+                    let (n, p) = arg.split_once(' ').unwrap_or((arg, ""));
+                    if let Some(c) = n.parse::<usize>().ok().and_then(|i| self.project.clips.get(i)) {
+                        self.relink(c.id, PathBuf::from(p.trim()));
+                    }
+                    true
+                }
+                "settings" => {
+                    self.open_settings();
+                    true
+                }
+                "show-save-prompt" => {
+                    // the unsaved-changes prompt, for a screenshot (answer: Cancel)
+                    self.proj.prompt = Some(crate::project::After::New);
+                    true
+                }
+                "close-dialogs" => {
+                    self.proj.prompt = None;
+                    self.proj.relink_open = false;
+                    self.title_dialog = None;
+                    self.close_settings();
+                    true
+                }
+                "print-youtube" => {
+                    if let Some(Ok(p)) = &self.plan {
+                        for o in &p.outputs {
+                            let ch = keepcut_core::exec::build_chapters(o, self.project.export.chapters);
+                            let (text, warn) = keepcut_core::chapters::youtube_block(&ch);
+                            out(format!("youtube: {} | {} | warnings: {warn:?}", o.path.display(), text.replace('\n', " / ")));
+                        }
+                    }
+                    true
+                }
                 "wait-encoders" => self.encoders_detected(),
                 "show-export-log" => {
                     self.export.show_finished_log();
@@ -286,9 +369,12 @@ impl App {
     /// `set KEY VALUE`: mode joined|per-clip|per-segment · codec h264|hevc ·
     /// encoder NAME|auto · smart-encoder NAME|auto · quality match|crf N|bitrate N ·
     /// smart-quality … · res same|1080|WxH · fps keep|N · content auto|screen|camera ·
-    /// audio mix|first · aac KBPS · target auto|N (index in the plan's format list).
+    /// audio mix|first · aac KBPS · target auto|N (index in the plan's format list) ·
+    /// loudness off|whole|per-clip|per-segment · lufs N · chapters none|per-clip|per-segment.
     fn set_export_option(&mut self, key: &str, val: &str) -> anyhow::Result<()> {
-        use keepcut_core::model::{AudioTracks, ContentType, OutputMode, Quality, Resolution, VideoCodec};
+        use keepcut_core::model::{
+            AudioTracks, Chapters, ContentType, Loudness, OutputMode, Quality, Resolution, VideoCodec,
+        };
         let quality = |v: &str| -> anyhow::Result<Quality> {
             let (k, n) = v.split_once(' ').unwrap_or((v, ""));
             Ok(match k {
@@ -331,6 +417,24 @@ impl App {
             }
             "audio" => x.audio_tracks = if val == "first" { AudioTracks::FirstOnly } else { AudioTracks::MixAll },
             "aac" => x.audio_bitrate_kbps = val.parse()?,
+            "loudness" => {
+                x.loudness = match val {
+                    "off" => Loudness::Off,
+                    "whole" => Loudness::Whole,
+                    "per-clip" => Loudness::PerClip,
+                    "per-segment" => Loudness::PerSegment,
+                    _ => anyhow::bail!("off | whole | per-clip | per-segment"),
+                }
+            }
+            "lufs" => x.loudness_target = val.parse()?,
+            "chapters" => {
+                x.chapters = match val {
+                    "none" => Chapters::None,
+                    "per-clip" => Chapters::PerClip,
+                    "per-segment" => Chapters::PerSegment,
+                    _ => anyhow::bail!("none | per-clip | per-segment"),
+                }
+            }
             "target" => {
                 x.target_override = match (&self.plan, val) {
                     (_, "auto") => None,
@@ -381,6 +485,14 @@ impl App {
             "player_time": (self.player.state.time_pos * 1000.0).round() / 1000.0,
             "loaded": format!("{:?}", std::mem::discriminant(&self.loaded)),
             "preview": matches!(self.loaded, crate::app::Loaded::Preview { .. }),
+            "project": self.project_name(),
+            "dirty": self.proj.dirty,
+            "missing": self.missing_count(),
+            "relink_open": self.proj.relink_open,
+            "titles": self.project.clips.iter().map(|c| serde_json::json!({
+                "clip": c.chapter_title,
+                "segments": c.segments.iter().flatten().map(|s| s.chapter_title.clone()).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
             "can_undo": self.history.can_undo(),
             "can_redo": self.history.can_redo(),
             "plan": plan,

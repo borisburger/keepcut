@@ -10,7 +10,9 @@ use keepcut_core::encoders::{self, EncoderSet};
 use keepcut_core::exec::{self, ExecOptions};
 use keepcut_core::fsutil;
 use keepcut_core::ffmpeg::{CancelToken, LogLine, LogSink, Tools};
-use keepcut_core::model::{EncodingMode, OutputMode, Project, Quality, Resolution, VideoCodec};
+use keepcut_core::model::{
+    Chapters, EncodingMode, Loudness, OutputMode, Project, Quality, Resolution, VideoCodec,
+};
 use keepcut_core::plan::{self, PieceKind};
 use keepcut_core::probe::{self, MediaInfo};
 use keepcut_core::timefmt;
@@ -94,6 +96,30 @@ struct Overrides {
     /// Target video bitrate (kbps) for whole re-encodes.
     #[arg(long)]
     bitrate: Option<u32>,
+    /// Loudness normalization (§6.9).
+    #[arg(long, value_enum)]
+    loudness: Option<LoudnessArg>,
+    /// Loudness target in LUFS (default -14).
+    #[arg(long, allow_hyphen_values = true)]
+    lufs: Option<f64>,
+    /// Embedded chapters (§6.13); also prints the YouTube chapter lines.
+    #[arg(long, value_enum)]
+    chapters: Option<ChaptersArg>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LoudnessArg {
+    Off,
+    Whole,
+    PerClip,
+    PerSegment,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ChaptersArg {
+    None,
+    PerClip,
+    PerSegment,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -241,6 +267,18 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            if p.export.chapters != Chapters::None {
+                for out in &plan.outputs {
+                    let ch = exec::build_chapters(out, p.export.chapters);
+                    let (text, warn) = keepcut_core::chapters::youtube_block(&ch);
+                    println!("
+YouTube chapters for {}:
+{text}", out.path.display());
+                    for w in warn {
+                        println!("  (YouTube: {w})");
+                    }
+                }
+            }
             if !all_ok {
                 bail!("verification failed");
             }
@@ -306,6 +344,24 @@ fn load(
     if let Some(q) = ov.crf.map(Quality::Crf).or(ov.bitrate.map(Quality::BitrateKbps)) {
         x.full.quality = q.clone();
         x.smart_quality = q;
+    }
+    if let Some(l) = ov.loudness {
+        x.loudness = match l {
+            LoudnessArg::Off => Loudness::Off,
+            LoudnessArg::Whole => Loudness::Whole,
+            LoudnessArg::PerClip => Loudness::PerClip,
+            LoudnessArg::PerSegment => Loudness::PerSegment,
+        };
+    }
+    if let Some(v) = ov.lufs {
+        x.loudness_target = v;
+    }
+    if let Some(c) = ov.chapters {
+        x.chapters = match c {
+            ChaptersArg::None => Chapters::None,
+            ChaptersArg::PerClip => Chapters::PerClip,
+            ChaptersArg::PerSegment => Chapters::PerSegment,
+        };
     }
     let mut infos = Vec::new();
     for c in &p.clips {

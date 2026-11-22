@@ -1,6 +1,6 @@
 # Keepcut — Implementation Plan
 
-Status: **Phase 0A (export pipeline) and Phase 0B (player) spikes done** on the author's Windows laptop (results and decisions: §3.3–3.5); **Phase 1 (MVP GUI) built, awaiting the author's hands-on test; Phase 2 (export completeness) first pass done** (2026-11-18). Open spike items are listed in §11. Plan written and finalized 2026-11-17.
+Status: **Phase 0A (export pipeline) and Phase 0B (player) spikes done** on the author's Windows laptop (results and decisions: §3.3–3.5); **Phase 1 (MVP GUI) built, awaiting the author's hands-on test; Phase 2 (export completeness) done** (2026-11-18); **Phase 3 (comfort features) first pass done** (2026-11-22). Open spike items are listed in §11. Plan written and finalized 2026-11-17.
 This document is self-contained: it assumes no access to the planning conversation.
 
 ### Start here (for the implementer)
@@ -831,7 +831,7 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
 - player check of the outputs in mpv, VLC, a browser, Windows Media Player, and one unlisted YouTube upload (outputs from `keepcut-cli export … --out-dir samples/out`);
 - longer Bandicam QSV recordings (H.264 + HEVC, ≥ 60 s with activity) and a real 4K clip from the author;
 - hardware heads ("Fast heads", §6.14): hevc_nvenc/h264_nvenc heads, their speed, SSIM and seam compatibility (hardware whole-segment re-encodes are verified, Phase 2);
-- loudness (§6.9) is Phase 3 and not implemented; chapters are implemented in core but not yet exercised by a corpus run;
+- loudness (§6.9) and chapters: done in Phase 3 (see there);
 - free-space check (§6.10) and encoder re-test with the real target parameters (§6.8): implemented in Phase 2.
 
 **0B Player spike** (minimal eframe/glow app): open a file; play/pause; seek; frame step both ways; keyframe jump; EDL cut preview; the GL render path and the SW fallback.
@@ -922,6 +922,56 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
 - Loudness normalization (§6.9); chapters + YouTube block (§6.13).
 - Project save/open, autosave + recovery (§9); missing-file relink.
 - Waveform lane; clip thumbnails; Settings dialog.
+- **Status (2026-11-22, first pass, not yet committed):** all items above implemented.
+  - **Loudness (§6.9, `exec::loudness_gains`):**
+    - Measured with `ebur128` on the FLAC pieces, which runs at ~500× real time (a concat list per unit). This replaces the planned `loudnorm` analysis, which gives the same BS.1770 integrated loudness more slowly.
+    - Per clip: all of that clip's pieces in the output. Per segment: each segment, except segments under 3 s, which use their clip's value. Whole: the output.
+    - Gains are clamped to ±20 dB; units at −70 LUFS or below (silence) get 0 dB.
+    - **Applied in the final mux, not as new FLAC pieces.** `plan::loudness_filter` builds `asetnsamples=n=64,volume='Σ gain·window(t)':eval=frame,alimiter=limit=0.891:level=disabled:latency=1`, read from a file with `-/af` because it can be long.
+      - The gain runs in float, so nothing clips before the limiter. Re-encoded s16/s32 FLAC pieces would clip at +gain.
+      - The gain switches on 1.3 ms frames, half a frame early.
+    - **Limiter fix:** without `latency=1`, `alimiter` delays the audio by its 5 ms look-ahead (measured: 239 samples). The Phase 1 mux had this latent bug.
+  - **Chapters (§6.13):**
+    - Per-clip chapters use the clip's chapter title (was always the file stem) and merge that clip's consecutive segments.
+    - The default segment title is just the clip title when the clip has a single kept segment, else "Title – N" (`chapters::default_segment_title`).
+    - Titles are stored as typed and trimmed by the planner.
+  - **GUI:**
+    - Export dialog: Loudness (Off / Whole / Per clip / Per segment + target) and Chapters (None / Per clip / Per segment). "Copy YouTube chapters" with YouTube's rules checked, in the dialog and per output in the finish window.
+    - Clip context menu "Chapter title…" (dialog); segment list "Chapter title" column (inline, one undo step per edit).
+    - All of these are remembered in the config.
+  - **Projects (§9, core `projfile`, GUI `project.rs`):**
+    - `.keepcut` JSON, version 1, atomic writes, refuses newer versions.
+    - Stores each clip's path relative to the project folder too, so a folder moved together with its project opens unchanged.
+    - Project menu: New / Open / Save / Save as (Ctrl+N/O/S/Shift+S). A `.keepcut` on the command line or dropped on the window opens it. The window title shows the name and `*`.
+    - Unsaved-changes prompt (Save / Don't save / Cancel) on New, Open and closing the window. An untitled session that was exported after its last edit closes without asking.
+    - **Autosave:** 2 s after the last change, to `<data dir>/autosave/<project id>.keepcut`. Deleted on clean exit and on save.
+    - **Recovery:** at start (no files given), the newest autosave that is newer than its project file is offered (Restore / Discard); stale ones are deleted.
+    - **Changed sources:** a size/date that differs from the project → segments fitted to the new length (`edit::normalize`), a "changed" badge, and a status message.
+    - **Missing sources:** a "missing file" badge, a relink dialog on open (Locate… / Remove) and "Locate…" in the clip menu. Locating one file also relinks the other missing clips found in that folder. Relinking is undoable.
+    - **Fix found while testing:** probing re-sorted every clip by recording time, so opening a project could reorder it. Now only newly added clips are placed by recording time.
+  - **Thumbnails and waveform (`core::assets`, GUI `media::AssetService`):**
+    - Two background workers, cached in `<cache dir>/{thumbs,waves}/` by path + size + date.
+    - Thumbnail: 192×108 RGBA, letterboxed, from the keyframe at or before 10% (`-noaccurate_seek`, one frame decoded even with 30 s GOPs).
+    - Waveform: all audio tracks mixed to mono at 8 kHz, peak per 10 ms. Drawn in a lane under the timeline on a −48…0 dB scale, brighter inside kept segments. The selected clip goes first.
+  - **Settings dialog (§8.7):**
+    - ffmpeg folder (or automatic; the version is shown; unreadable clips are re-read after a change).
+    - Re-detect encoders, temp folder (with free space), default loudness target, full decode check, theme (System / Light / Dark), video display path (after a restart), and buttons that open the log and settings folders.
+  - **CLI:** `--loudness off|whole|per-clip|per-segment --lufs N --chapters none|per-clip|per-segment`; prints the YouTube chapter lines.
+  - **Script commands:** `set loudness|lufs|chapters`, `clip-title`, `seg-title`, `print-youtube`, `save`, `open`, `new`, `relink`, `settings`, `show-save-prompt`, `close-dialogs`. Scripted runs never autosave, prompt or offer recovery.
+  - **Verified:**
+    - Unit tests: ebur128 parsing, gain rule, filter builder, per-clip chapter merging, project round trip and moved folder, newer-version refusal, peaks.
+    - Pipeline tests: loudness per clip + chapters (each clip within 1 LU of −16, chapter times and titles); thumbnail and waveform on synthetic media.
+    - Corpus (bandicut.json, per segment −16): gains +6.4 / +0.2 / +6.6 dB, Verified, A−V 0.
+    - GUI script (synthetic clips):
+      - Per-clip loudness: −43.8 → −23.8 (clamped at +20 dB), −10.4 → −16.0, −29.3 → −16.0.
+      - Chapters "Intro / Main match / Outro" at 0 / 8 / 23 s; export 31.000 s, 930/930 frames, A−V 0.
+      - Save, dirty after an edit, clean again after undo.
+      - Missing + changed files after moving and replacing sources; relinking one found the other.
+      - Config unchanged; no autosave written.
+  - **Not done / open:**
+    - Autosave and recovery are untested by automation (scripted runs disable them by design); they need a hands-on check, e.g. kill Keepcut after an edit and start it again.
+    - Several Keepcut instances share the autosave folder, so a second instance could offer the first one's autosave.
+    - Seeking right after selecting a clip can fail while mpv is still loading the file ("Raw(-12)"); this predates Phase 3.
 
 ### Phase 4 — Packaging
 - Windows zip + installer; Linux Flatpak; macOS best-effort; CI release workflow; README with install instructions per distro.

@@ -33,6 +33,16 @@ pub fn ffmetadata(chapters: &[Chapter]) -> String {
     s
 }
 
+/// Default chapter title of a segment: the clip's title, numbered ("Intro – 2")
+/// when the clip has more than one kept segment.
+pub fn default_segment_title(clip_title: &str, seg_idx: usize, kept_segments: usize) -> String {
+    if kept_segments <= 1 {
+        clip_title.to_string()
+    } else {
+        format!("{clip_title} – {}", seg_idx + 1)
+    }
+}
+
 /// `0:00 Intro` lines, plus warnings if YouTube's rules are not met.
 pub fn youtube_block(chapters: &[Chapter]) -> (String, Vec<String>) {
     let hours = chapters.last().is_some_and(|c| c.start >= 3600.0);

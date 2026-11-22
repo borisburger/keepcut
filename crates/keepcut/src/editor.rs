@@ -2,7 +2,7 @@
 //! segment list (§8.1, §8.4).
 
 use eframe::egui::{self, RichText};
-use keepcut_core::timefmt;
+use keepcut_core::{chapters, timefmt};
 
 use crate::app::{App, Loaded};
 
@@ -123,11 +123,17 @@ impl App {
         let Some(id) = self.selected else { return };
         let Some(info) = self.info(id) else { return };
         let segs = self.segments(id).to_vec();
+        let clip_title = self
+            .clip(id)
+            .and_then(|c| c.chapter_title.clone())
+            .unwrap_or_else(|| info.file_stem());
         let mut select = None;
         let mut delete = None;
+        let mut title_change: Option<(uuid::Uuid, String)> = None;
+        let mut title_focus = false;
         egui::ScrollArea::vertical().max_height(130.0).auto_shrink([false, true]).show(ui, |ui| {
-            egui::Grid::new("segments").striped(true).num_columns(6).spacing([16.0, 2.0]).show(ui, |ui| {
-                for h in ["#", "Start", "End", "Duration", "Start frame", ""] {
+            egui::Grid::new("segments").striped(true).num_columns(7).spacing([16.0, 2.0]).show(ui, |ui| {
+                for h in ["#", "Start", "End", "Duration", "Start frame", "Chapter title", ""] {
                     ui.strong(h);
                 }
                 ui.end_row();
@@ -148,6 +154,15 @@ impl App {
                             None => ui.colored_label(ui.visuals().warn_fg_color, "re-encoded"),
                         };
                     }
+                    let mut text = s.chapter_title.clone().unwrap_or_default();
+                    let hint = chapters::default_segment_title(&clip_title, i, segs.len());
+                    let r = ui
+                        .add(egui::TextEdit::singleline(&mut text).hint_text(hint).desired_width(180.0))
+                        .on_hover_text("Title of this segment's chapter (per-segment chapters). Empty: the default shown.");
+                    title_focus |= r.gained_focus();
+                    if r.changed() {
+                        title_change = Some((s.id, text));
+                    }
                     if ui.small_button("Remove").on_hover_text("Delete this segment").clicked() {
                         delete = Some(s.id);
                     }
@@ -158,6 +173,25 @@ impl App {
                 ui.weak("Nothing kept from this clip. Use Set start (I) / Set end (O) to keep a part.");
             }
         });
+        // inline title edit: changes apply as you type; one undo step when the field
+        // loses focus (App::commit_title_edit)
+        if title_focus && self.title_before.is_none() {
+            self.title_before = Some(self.project.clips.clone());
+        }
+        if let Some((sid, text)) = title_change
+            && let Some(seg) = self
+                .project
+                .clips
+                .iter_mut()
+                .filter_map(|c| c.segments.as_mut())
+                .flatten()
+                .find(|s| s.id == sid)
+        {
+            // stored as typed (trimming here would eat the space just typed);
+            // the planner trims
+            seg.chapter_title = (!text.trim().is_empty()).then_some(text);
+            self.mark_plan_dirty();
+        }
         if let Some((sid, t)) = select {
             self.selected_seg = Some(sid);
             self.seek(t);

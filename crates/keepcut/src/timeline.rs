@@ -2,7 +2,7 @@
 //! playhead; click/drag to seek, drag edges to trim, Ctrl+wheel to zoom.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use keepcut_core::edit;
+use keepcut_core::{assets, edit};
 use keepcut_core::probe::FrameIndex;
 use keepcut_core::timefmt;
 
@@ -20,6 +20,8 @@ const KEEP: Color32 = Color32::from_rgb(52, 120, 200);
 const KEEP_SELECTED: Color32 = Color32::from_rgb(90, 160, 240);
 const ON_KEY: Color32 = Color32::from_rgb(70, 200, 90);
 const HEAD_REENCODE: Color32 = Color32::from_rgb(240, 170, 40);
+const WAVE_KEPT: Color32 = Color32::from_rgb(110, 175, 235);
+const WAVE_LANE: f32 = 34.0;
 
 impl App {
     pub fn timeline(&mut self, ui: &mut egui::Ui) {
@@ -51,9 +53,16 @@ impl App {
             (0.0, dur)
         };
 
-        let (rect, resp) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::click_and_drag());
-        let bar = Rect::from_min_max(rect.min + vec2(0.0, 14.0), rect.max - vec2(0.0, 12.0));
+        // waveform lane under the bar (clips with audio, §8.3)
+        let lane_h = if info.audio.is_empty() { 0.0 } else { WAVE_LANE };
+        let (rect, resp) = ui.allocate_exact_size(
+            vec2(ui.available_width(), 64.0 + lane_h),
+            Sense::click_and_drag(),
+        );
+        let bar = Rect::from_min_max(
+            rect.min + vec2(0.0, 14.0),
+            rect.max - vec2(0.0, 12.0 + lane_h),
+        );
         let w = bar.width().max(1.0);
         let x_of = |t: f64| bar.left() + ((t - v0) / (v1 - v0)) as f32 * w;
         let t_of = |x: f32| v0 + ((x - bar.left()) / w).clamp(0.0, 1.0) as f64 * (v1 - v0);
@@ -119,6 +128,54 @@ impl App {
                     Stroke::new(1.0, vis.warn_fg_color),
                 );
                 last_x = x;
+            }
+        }
+
+        // waveform: peak per pixel column, brighter inside kept segments
+        if lane_h > 0.0 {
+            let lane = Rect::from_x_y_ranges(
+                bar.x_range(),
+                (bar.bottom() + 8.0)..=(bar.bottom() + lane_h - 2.0),
+            );
+            painter.rect_filled(lane, 2.0, vis.extreme_bg_color.gamma_multiply(0.6));
+            match self.waves.get(&info.path) {
+                Some(Some(peaks)) if !peaks.is_empty() => {
+                    let mid = lane.center().y;
+                    let half = lane.height() / 2.0 - 1.0;
+                    let mut x = lane.left();
+                    while x < lane.right() {
+                        let (t0, t1) = (t_of(x), t_of(x + 1.0));
+                        let h = assets::wave_height(peaks, t0, t1) * half;
+                        if h > 0.3 {
+                            let kept = edit::segment_at(&segs, (t0 + t1) / 2.0).is_some();
+                            let col = if kept { WAVE_KEPT } else { vis.weak_text_color() };
+                            painter.line_segment(
+                                [pos2(x + 0.5, mid - h), pos2(x + 0.5, mid + h)],
+                                Stroke::new(1.0, col),
+                            );
+                        }
+                        x += 1.0;
+                    }
+                }
+                Some(Some(_)) => {}
+                Some(None) => {
+                    painter.text(
+                        lane.left_center() + vec2(6.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        "waveform not available",
+                        egui::FontId::proportional(11.0),
+                        vis.weak_text_color(),
+                    );
+                }
+                None => {
+                    painter.text(
+                        lane.left_center() + vec2(6.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        "reading audio…",
+                        egui::FontId::proportional(11.0),
+                        vis.weak_text_color(),
+                    );
+                }
             }
         }
 

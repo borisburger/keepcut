@@ -10,10 +10,11 @@ use keepcut_core::exec::{self, ExecOptions, OutputResult};
 use keepcut_core::ffmpeg::{CancelToken, LogLine, LogSink};
 use keepcut_core::compat::Signature;
 use keepcut_core::encoders::{self, EncoderSet};
+use keepcut_core::chapters::{self, Chapter};
 use keepcut_core::fsutil;
 use keepcut_core::model::{
-    AudioTracks, ContentType, EncodingMode, FullEncodeSettings, OutputMode, Quality, Resolution,
-    VideoCodec,
+    AudioTracks, Chapters, ContentType, EncodingMode, FullEncodeSettings, Loudness, OutputMode,
+    Quality, Resolution, VideoCodec,
 };
 use keepcut_core::plan;
 use keepcut_core::probe::MediaInfo;
@@ -44,6 +45,8 @@ struct Job {
     rx: Receiver<Result<Vec<OutputResult>, String>>,
     started: Instant,
     show_log: bool,
+    /// Chapters of each output (for "Copy YouTube chapters").
+    chapters: Vec<Vec<Chapter>>,
 }
 
 struct Finished {
@@ -51,6 +54,7 @@ struct Finished {
     log: Vec<String>,
     elapsed: Duration,
     show_log: bool,
+    chapters: Vec<Vec<Chapter>>,
 }
 
 impl ExportUi {
@@ -126,6 +130,7 @@ impl App {
                 log,
                 elapsed: job.started.elapsed(),
                 show_log: false,
+                chapters: job.chapters.clone(),
             });
             self.export.job = None;
         }
@@ -307,7 +312,62 @@ impl App {
                         });
                 });
                 ui.end_row();
+
+                ui.label("Loudness").on_hover_text(
+                    "Evens out the volume: measures the integrated loudness (EBU R128) and applies \
+                     one gain per unit, up to ±20 dB, with a limiter at −1 dB. Silence is left alone.",
+                );
+                ui.horizontal(|ui| {
+                    let shown = match x.loudness {
+                        Loudness::Off => "Off",
+                        Loudness::Whole => "Whole video",
+                        Loudness::PerClip => "Per clip",
+                        Loudness::PerSegment => "Per segment",
+                    };
+                    egui::ComboBox::from_id_salt("loudness").selected_text(shown).show_ui(ui, |ui| {
+                        changed |= ui.selectable_value(&mut x.loudness, Loudness::Off, "Off").changed();
+                        changed |= ui
+                            .selectable_value(&mut x.loudness, Loudness::Whole, "Whole video")
+                            .on_hover_text("One gain for the whole file (each file in the per-clip/per-segment modes)")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(&mut x.loudness, Loudness::PerClip, "Per clip")
+                            .on_hover_text("One gain per source clip: evens out recordings made at different levels")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(&mut x.loudness, Loudness::PerSegment, "Per segment")
+                            .on_hover_text("One gain per kept segment; segments shorter than 3 s use their clip's value")
+                            .changed();
+                    });
+                    if x.loudness != Loudness::Off {
+                        ui.label("target");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut x.loudness_target).range(-30.0..=-5.0).speed(0.1).fixed_decimals(1).suffix(" LUFS"))
+                            .on_hover_text("−14 LUFS is what YouTube and Spotify play at; −16 for podcasts, −23 for broadcast")
+                            .changed();
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Chapters").on_hover_text(
+                    "Chapter marks in the MP4 (players show them on the seek bar). \
+                     Titles: the clip's file name, or what you set in the clip list / segment list.",
+                );
+                ui.horizontal(|ui| {
+                    changed |= ui.radio_value(&mut x.chapters, Chapters::None, "None").changed();
+                    changed |= ui.radio_value(&mut x.chapters, Chapters::PerClip, "Per clip").changed();
+                    changed |= ui.radio_value(&mut x.chapters, Chapters::PerSegment, "Per segment").changed();
+                });
+                ui.end_row();
             });
+            // YouTube reads chapters from the description, not the file (§6.13)
+            if self.project.export.chapters != Chapters::None
+                && let Some(Ok(p)) = &self.plan
+                && let Some(first) = p.outputs.first()
+            {
+                let ch = exec::build_chapters(first, self.project.export.chapters);
+                youtube_button(ui, &ch, p.outputs.len() > 1);
+            }
 
             ui.separator();
             ui.strong("Plan");
@@ -355,7 +415,7 @@ impl App {
                     // disk space (§6.10): the export checks this again before it starts
                     let temp = p.outputs.iter().map(|o| o.est_temp_bytes).max().unwrap_or(0);
                     let total: u64 = p.outputs.iter().map(|o| o.est_bytes).sum();
-                    let temp_dir = std::env::temp_dir();
+                    let temp_dir = self.config.temp_dir.clone().unwrap_or_else(std::env::temp_dir);
                     let temp_free = fsutil::free_space(&temp_dir);
                     let out_dir = p.outputs.first().and_then(|o| o.path.parent()).map(Path::to_path_buf);
                     let out_free = out_dir.as_deref().and_then(fsutil::free_space);
@@ -518,8 +578,18 @@ impl App {
                 return;
             }
         };
+        self.note_export_started();
         // keep the player from holding a decoder busy while exporting
         self.player.command("set", &["pause", "yes"]);
+        let opts = ExecOptions {
+            temp_root: self.config.temp_dir.clone(),
+            decode_check: if self.config.full_decode_check {
+                DecodeCheck::Full
+            } else {
+                DecodeCheck::Seams
+            },
+            ..Default::default()
+        };
         let cancel = CancelToken::new();
         let progress = Arc::new(Mutex::new(exec::Progress {
             fraction: 0.0,
@@ -532,6 +602,11 @@ impl App {
             plan.outputs.len(),
             plan.encoding
         ));
+        let chapters = plan
+            .outputs
+            .iter()
+            .map(|o| exec::build_chapters(o, project.export.chapters))
+            .collect();
         let (tx, rx) = channel();
         {
             let (cancel, progress, log) = (cancel.clone(), progress.clone(), log.clone());
@@ -566,11 +641,7 @@ impl App {
                             }
                         })
                     };
-                    exec::cleanup_stale(None);
-                    let opts = ExecOptions {
-                        decode_check: DecodeCheck::Seams,
-                        ..Default::default()
-                    };
+                    exec::cleanup_stale(opts.temp_root.as_deref());
                     let mut on_progress = |p: exec::Progress| *progress.lock().unwrap() = p;
                     let r = exec::execute(
                         &tools,
@@ -594,6 +665,7 @@ impl App {
             rx,
             started: Instant::now(),
             show_log: false,
+            chapters,
         });
     }
 
@@ -647,7 +719,7 @@ impl App {
                         "Export finished with warnings"
                     });
                     ui.weak(format!("in {}", fmt_dur(f.elapsed.as_secs_f64())));
-                    for r in results {
+                    for (i, r) in results.iter().enumerate() {
                         let v = &r.verification;
                         ui.separator();
                         ui.label(RichText::new(r.path.display().to_string()).strong());
@@ -673,6 +745,9 @@ impl App {
                             }
                             if ui.button("Play").clicked() {
                                 open_with_default_app(&r.path);
+                            }
+                            if let Some(ch) = f.chapters.get(i).filter(|c| !c.is_empty()) {
+                                youtube_button(ui, ch, false);
                             }
                         });
                     }
@@ -716,6 +791,31 @@ impl App {
             self.start_export();
         }
     }
+}
+
+/// "Copy YouTube chapters": `0:00 Title` lines for the video description, with
+/// YouTube's rules checked (§6.13).
+fn youtube_button(ui: &mut egui::Ui, ch: &[Chapter], first_of_many: bool) {
+    let (text, warn) = chapters::youtube_block(ch);
+    ui.vertical(|ui| {
+        let label = if first_of_many {
+            "Copy YouTube chapters (first file)"
+        } else {
+            "Copy YouTube chapters"
+        };
+        if ui
+            .button(label)
+            .on_hover_text(format!(
+                "YouTube ignores chapters inside the file; paste these lines into the video description:\n\n{text}"
+            ))
+            .clicked()
+        {
+            ui.ctx().copy_text(text.clone());
+        }
+        for w in warn {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("YouTube: {w}"));
+        }
+    });
 }
 
 /// Encoder dropdown: Auto + the working encoders for `codec`. Returns "changed".
