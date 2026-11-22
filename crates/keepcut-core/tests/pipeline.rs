@@ -763,18 +763,26 @@ fn corpus_projects() {
     }
 }
 
-#[test]
-fn av1_nut_intermediates() {
-    let Some(t) = tools() else { return };
-    let dir = tempfile::tempdir().unwrap();
-    let a = make_clip(
-        &t,
-        dir.path(),
-        "av1.mp4",
-        SRC_360,
-        &[
-            "-t",
-            "6",
+/// Fast settings for an AV1 encoder this ffmpeg has, if any. ffmpeg builds differ:
+/// BtbN's and gyan.dev's have libaom, Homebrew's has SVT-AV1 but no libaom.
+fn av1_encoder_args(t: &Tools) -> Option<&'static [&'static str]> {
+    let out = ffmpeg::run_checked(
+        &t.ffmpeg().args(["-hide_banner", "-encoders"]),
+        RunOpts {
+            quiet_stderr: true,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    let list = String::from_utf8_lossy(&out.stdout);
+    let has = |name: &str| {
+        list.lines()
+            .any(|l| l.split_whitespace().nth(1) == Some(name))
+    };
+    if has("libsvtav1") {
+        Some(&["-c:v", "libsvtav1", "-preset", "12", "-crf", "35"])
+    } else if has("libaom-av1") {
+        Some(&[
             "-c:v",
             "libaom-av1",
             "-cpu-used",
@@ -783,12 +791,26 @@ fn av1_nut_intermediates() {
             "realtime",
             "-crf",
             "35",
-            "-g",
-            "30",
-            "-c:a",
-            "aac",
-        ],
-    );
+        ])
+    } else if has("librav1e") {
+        Some(&["-c:v", "librav1e", "-speed", "10", "-qp", "100"])
+    } else {
+        None
+    }
+}
+
+#[test]
+fn av1_nut_intermediates() {
+    let Some(t) = tools() else { return };
+    let Some(encoder) = av1_encoder_args(&t) else {
+        eprintln!("skipping: this ffmpeg has no AV1 encoder (libsvtav1, libaom-av1, librav1e)");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = vec!["-t", "6"];
+    args.extend_from_slice(encoder);
+    args.extend_from_slice(&["-g", "30", "-c:a", "aac"]);
+    let a = make_clip(&t, dir.path(), "av1.mp4", SRC_360, &args);
     let plan = export(
         &t,
         dir.path(),
