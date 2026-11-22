@@ -42,7 +42,33 @@ flatpak install --user ./Keepcut-<version>-linux-x86_64.flatpak
 flatpak run io.github.borisburger.Keepcut
 ```
 
-After a fresh Flatpak install, log out and back in once so that Keepcut shows up in the application menu. The Flatpak has access to your files (clips can be anywhere, and outputs are written next to them) and to the GPU, including NVENC/NVDEC on NVIDIA and VA-API on Intel/AMD.
+After a fresh Flatpak install, log out and back in once so that Keepcut shows up in the application menu.
+
+**WSL (Windows Subsystem for Linux)** needs two extra steps:
+
+1. WSLg's Wayland compositor drops Keepcut's connection right after the window opens ("Broken pipe"), so run it through WSLg's X11 server instead (once per user):
+   ```sh
+   flatpak override --user --nosocket=wayland --socket=x11 --unset-env=WAYLAND_DISPLAY io.github.borisburger.Keepcut
+   ```
+2. File dialogs come from the desktop's file chooser portal, which WSL doesn't run. Install a portal backend and `dbus-run-session` (AlmaLinux/Fedora: `sudo dnf install xdg-desktop-portal-gtk dbus-daemon`; Ubuntu/Debian: `sudo apt install xdg-desktop-portal-gtk dbus-daemon`), then start Keepcut with a session bus:
+   ```sh
+   XDG_CURRENT_DESKTOP=GNOME dbus-run-session -- flatpak run io.github.borisburger.Keepcut
+   ```
+
+In WSL the app can't use the GPU from inside the sandbox, so the video is drawn in software, and exports use the CPU encoders. The Flatpak has access to your files (clips can be anywhere, and outputs are written next to them) and to the GPU, including NVENC/NVDEC on NVIDIA and VA-API on Intel/AMD.
+
+### Linux (AppImage)
+
+`Keepcut-<version>-x86_64.AppImage` is a single file that runs on AlmaLinux/Rocky/RHEL 9 and newer, Ubuntu 22.04 and newer, Debian 12 and newer, and current Fedora:
+
+```sh
+chmod +x Keepcut-<version>-x86_64.AppImage
+./Keepcut-<version>-x86_64.AppImage
+```
+
+Unlike the Flatpak it isn't sandboxed and uses your system's graphics drivers directly, including NVENC encoding and NVDEC decoding with the NVIDIA driver. Where FUSE isn't available, run it with `--appimage-extract-and-run`. File dialogs use the desktop's portal (xdg-desktop-portal) like the Flatpak, or `zenity` if that is installed.
+
+In **WSL** the AppImage is the better choice: it reaches the GPU through WSL's NVIDIA driver (NVENC/NVDEC work), and it switches to WSLg's X11 server by itself, because WSLg's Wayland compositor crashes on Keepcut's window (`KEEPCUT_WAYLAND=1` keeps Wayland). Drawing is still done in software unless the distribution's Mesa has the `d3d12` driver (Ubuntu's does, AlmaLinux 9's doesn't).
 
 ### macOS (best effort)
 
@@ -67,7 +93,7 @@ cargo run --release -p keepcut
 - Ubuntu/Debian: `sudo apt install build-essential pkg-config libmpv-dev ffmpeg libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev`
 - Fedora: `sudo dnf install gcc pkgconf-pkg-config mpv-libs-devel libxkbcommon-devel wayland-devel libX11-devel libXcursor-devel libXrandr-devel libXi-devel mesa-libGL-devel mesa-libEGL-devel`, and ffmpeg from RPM Fusion (Fedora's `ffmpeg-free` lacks H.264/HEVC).
 
-`packaging/linux/build-flatpak.sh` builds the Flatpak bundle (needs `flatpak-builder`).
+`packaging/linux/build-flatpak.sh` builds the Flatpak bundle (needs `flatpak-builder`). `packaging/linux/appimage/build.sh` builds the AppImage in an AlmaLinux 9 container (needs podman or docker; the compilers, Rust and all build dependencies live in the container).
 
 **macOS**: `brew install mpv ffmpeg`, then `LIBRARY_PATH="$(brew --prefix)/lib" cargo run --release -p keepcut`. `packaging/macos/package.sh` builds the app bundle.
 

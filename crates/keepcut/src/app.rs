@@ -109,6 +109,8 @@ pub struct App {
     pub export: ExportUi,
     pub status: String,
     status_at: Instant,
+    /// A file dialog couldn't be shown (no xdg-desktop-portal); explain it.
+    pub portal_notice: bool,
     /// A fast frame step (speed 32) is in flight.
     fast_step: Option<Instant>,
     pending_seek: Option<f64>,
@@ -192,6 +194,7 @@ impl App {
             export: ExportUi::default(),
             status: String::new(),
             status_at: Instant::now(),
+            portal_notice: false,
             fast_step: None,
             pending_seek: None,
             seek_target: None,
@@ -993,11 +996,8 @@ impl App {
                 .button("+ Add clips…")
                 .on_hover_text("or drop files onto the window")
                 .clicked()
-                && let Some(files) = rfd::FileDialog::new()
-                    .add_filter("Video", &["mp4", "mkv", "mov", "m4v", "ts", "avi", "webm"])
-                    .pick_files()
             {
-                self.add_files(files);
+                self.pick_and_add_files();
             }
             ui.menu_button("Project", |ui| {
                 use crate::project::After;
@@ -1243,6 +1243,41 @@ impl App {
             || self.proj.relink_open
             || self.settings_open()
     }
+
+    /// "Add clips…": the native file dialog, then add what was chosen.
+    pub fn pick_and_add_files(&mut self) {
+        if let Some(files) = rfd::FileDialog::new()
+            .add_filter(
+                "Video",
+                &crate::dialogs::filter_extensions(crate::dialogs::VIDEO_EXTENSIONS),
+            )
+            .pick_files()
+        {
+            self.add_files(files);
+        }
+    }
+
+    /// Explains a file dialog that couldn't be shown (see `dialogs`).
+    fn portal_notice_window(&mut self, ctx: &egui::Context) {
+        if crate::dialogs::take_portal_failure() {
+            tracing::warn!("no file dialog available (xdg-desktop-portal)");
+            self.portal_notice = true;
+        }
+        if !self.portal_notice {
+            return;
+        }
+        let modal = egui::Modal::new(egui::Id::unique("portal-notice")).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.heading("No file dialog available");
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(crate::dialogs::PORTAL_HELP).selectable(true));
+            ui.add_space(8.0);
+            ui.button("OK").clicked()
+        });
+        if modal.inner || modal.should_close() {
+            self.portal_notice = false;
+        }
+    }
 }
 
 fn is_project_file(p: &std::path::Path) -> bool {
@@ -1316,6 +1351,7 @@ impl eframe::App for App {
         self.commit_title_edit(&ctx);
         self.project_dialogs(&ctx);
         self.settings_window(&ctx);
+        self.portal_notice_window(&ctx);
         self.flush_seek();
 
         if let Some(Renderer::Gl(r)) = &self.renderer {

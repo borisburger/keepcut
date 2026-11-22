@@ -10,7 +10,8 @@
 //! close-export · export · wait-export · print-state · quit ·
 //! set KEY VALUE (export options, see `set_export_option`) · wait-encoders · log-panel ·
 //! clip-title N TEXT · seg-title N TEXT (selected clip) · print-youtube ·
-//! save PATH · open PATH · new · relink N PATH · settings · show-save-prompt · close-dialogs
+//! save PATH · open PATH · new · relink N PATH · settings · show-save-prompt · close-dialogs ·
+//! add-dialog
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -220,6 +221,11 @@ impl App {
                     self.mark_plan_dirty();
                     true
                 }
+                "add-dialog" => {
+                    // "Add clips…" with the real file dialog (blocks until it closes)
+                    self.pick_and_add_files();
+                    true
+                }
                 "output-name" => {
                     self.project.export.output_name = Some(arg.to_string());
                     self.mark_plan_dirty();
@@ -310,6 +316,7 @@ impl App {
                     self.proj.prompt = None;
                     self.proj.relink_open = false;
                     self.title_dialog = None;
+                    self.portal_notice = false;
                     self.close_settings();
                     true
                 }

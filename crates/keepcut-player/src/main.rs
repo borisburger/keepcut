@@ -639,7 +639,10 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 if ui.button("Open…").clicked()
                     && let Some(f) = rfd::FileDialog::new()
-                        .add_filter("video", &["mp4", "mkv", "mov", "ts"])
+                        .add_filter(
+                            "video",
+                            &["mp4", "MP4", "mkv", "MKV", "mov", "MOV", "ts", "TS"],
+                        )
                         .pick_file()
                 {
                     self.open(f);

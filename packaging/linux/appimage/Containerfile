@@ -1,0 +1,13 @@
+# Build environment for the Keepcut AppImage: AlmaLinux 9 (glibc 2.34) is the oldest target,
+# so binaries built here run on it and on everything newer. Keep this at the oldest
+# distribution to support, independent of what the build host runs.
+#
+# Built and used by packaging/linux/appimage/build.sh (podman or docker).
+FROM docker.io/library/almalinux:9
+
+COPY deps-el9.sh /tmp/deps-el9.sh
+RUN bash /tmp/deps-el9.sh && rm /tmp/deps-el9.sh
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH
+WORKDIR /src

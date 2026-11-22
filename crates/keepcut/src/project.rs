@@ -140,7 +140,10 @@ impl App {
             After::Open(Some(p)) => self.open_project(&p),
             After::Open(None) => {
                 if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("Keepcut project", &[projfile::EXTENSION])
+                    .add_filter(
+                        "Keepcut project",
+                        &crate::dialogs::filter_extensions(&[projfile::EXTENSION]),
+                    )
                     .pick_file()
                 {
                     self.open_project(&p);
@@ -181,7 +184,10 @@ impl App {
             .map(|s| format!("{}.{}", s.to_string_lossy(), projfile::EXTENSION))
             .unwrap_or_else(|| format!("Untitled.{}", projfile::EXTENSION));
         let mut dlg = rfd::FileDialog::new()
-            .add_filter("Keepcut project", &[projfile::EXTENSION])
+            .add_filter(
+                "Keepcut project",
+                &crate::dialogs::filter_extensions(&[projfile::EXTENSION]),
+            )
             .set_file_name(default);
         if let Some(dir) = self
             .proj
@@ -374,7 +380,10 @@ impl App {
         let Some(c) = self.clip(id) else { return };
         let mut dlg = rfd::FileDialog::new()
             .set_title(format!("Locate {}", file_name(&c.path)))
-            .add_filter("Video", &["mp4", "mkv", "mov", "m4v", "ts", "avi", "webm"]);
+            .add_filter(
+                "Video",
+                &crate::dialogs::filter_extensions(crate::dialogs::VIDEO_EXTENSIONS),
+            );
         if let Some(d) = c.path.parent().filter(|d| d.is_dir()).or(self
             .proj
             .path

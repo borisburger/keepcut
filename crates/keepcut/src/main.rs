@@ -7,6 +7,7 @@
 mod app;
 mod clips;
 mod config;
+mod dialogs;
 mod editor;
 mod export;
 mod media;
@@ -47,6 +48,7 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
                 .with(filter)
                 .with(stderr)
                 .with(file_layer)
+                .with(dialogs::PortalWatch)
                 .init();
             Some(guard)
         }
@@ -54,6 +56,7 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(stderr)
+                .with(dialogs::PortalWatch)
                 .init();
             None
         }
@@ -81,8 +84,32 @@ fn app_icon() -> egui::IconData {
     decode().unwrap_or_default()
 }
 
+/// WSLg's Wayland compositor drops (and crashes on) this app's connection right after the first
+/// frame, so under WSL use WSLg's X11 server when there is one. `KEEPCUT_WAYLAND=1` keeps
+/// Wayland. Must run before any thread starts (it changes the environment).
+#[cfg(target_os = "linux")]
+fn prefer_x11_under_wsl() -> bool {
+    let wsl = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .is_ok_and(|r| r.to_ascii_lowercase().contains("microsoft"));
+    let env = |k| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    if wsl && env("WAYLAND_DISPLAY") && env("DISPLAY") && !env("KEEPCUT_WAYLAND") {
+        // SAFETY: called first thing in main, before any other thread exists.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+        return true;
+    }
+    false
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let x11_under_wsl = prefer_x11_under_wsl();
     let _log_guard = init_logging();
+    #[cfg(target_os = "linux")]
+    if x11_under_wsl {
+        tracing::info!(
+            "WSL: using X11 instead of WSLg's Wayland (set KEEPCUT_WAYLAND=1 to keep Wayland)"
+        );
+    }
     let mut files: Vec<PathBuf> = Vec::new();
     let mut script = None;
     let mut args = std::env::args_os().skip(1);
