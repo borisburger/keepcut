@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Keepcut
+GenericName=Video Cutter
+Comment=Mark the parts of your clips to keep, then cut and join them losslessly
+Exec=keepcut %F
+Icon=io.github.borisburger.Keepcut
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=video;cut;trim;join;lossless;ffmpeg;
+MimeType=application/x-keepcut;video/mp4;video/quicktime;video/x-matroska;video/mp2t;
+StartupWMClass=io.github.borisburger.Keepcut

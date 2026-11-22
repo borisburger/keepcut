@@ -1002,7 +1002,8 @@ impl App {
             ui.menu_button("Project", |ui| {
                 use crate::project::After;
                 let item = |ui: &mut egui::Ui, text: &str, keys: &str| {
-                    ui.add(egui::Button::new(text).shortcut_text(keys)).clicked()
+                    ui.add(egui::Button::new(text).shortcut_text(keys))
+                        .clicked()
                 };
                 if item(ui, "New", "Ctrl+N") {
                     self.request(After::New);

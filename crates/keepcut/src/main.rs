@@ -60,6 +60,27 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     }
 }
 
+/// The window icon (title bar, taskbar on Linux), decoded from the embedded PNG.
+fn app_icon() -> egui::IconData {
+    let decode = || -> Option<egui::IconData> {
+        let png = include_bytes!("../../../packaging/icons/keepcut-64.png");
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(&png[..]));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
+        let mut reader = decoder.read_info().ok()?;
+        let mut buf = vec![0; reader.output_buffer_size()?];
+        let info = reader.next_frame(&mut buf).ok()?;
+        buf.truncate(info.buffer_size());
+        let rgba8 =
+            info.color_type == png::ColorType::Rgba && info.bit_depth == png::BitDepth::Eight;
+        rgba8.then_some(egui::IconData {
+            rgba: buf,
+            width: info.width,
+            height: info.height,
+        })
+    };
+    decode().unwrap_or_default()
+}
+
 fn main() -> anyhow::Result<()> {
     let _log_guard = init_logging();
     let mut files: Vec<PathBuf> = Vec::new();
@@ -83,7 +104,9 @@ fn main() -> anyhow::Result<()> {
             .with_title("Keepcut")
             .with_inner_size([1500.0, 950.0])
             .with_min_inner_size([900.0, 600.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(app_icon())
+            .with_app_id("io.github.borisburger.Keepcut"),
         persist_window: false,
         ..Default::default()
     };

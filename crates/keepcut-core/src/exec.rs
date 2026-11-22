@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::chapters::{self, Chapter};
 use crate::encoders;
-use crate::fsutil;
 use crate::error::{Error, Result};
 use crate::ffmpeg::{self, CancelToken, LogLine, LogSink, RunOpts, Tools};
+use crate::fsutil;
 use crate::model::{Chapters, ExportSettings, Loudness};
 use crate::plan::{self, ExportPlan, OutputPlan, PieceKind};
 use crate::probe::MediaInfo;
@@ -94,7 +94,12 @@ pub fn check_encoders(
 /// volumes (§6.10). Falls back to a hidden folder next to the first output when
 /// the OS temp volume is too small.
 fn prepare_space(plan: &ExportPlan, opts: &ExecOptions, log: &LogSink) -> Result<TempPlace> {
-    let need_temp = plan.outputs.iter().map(|o| o.est_temp_bytes).max().unwrap_or(0);
+    let need_temp = plan
+        .outputs
+        .iter()
+        .map(|o| o.est_temp_bytes)
+        .max()
+        .unwrap_or(0);
     // estimates of re-encoded parts can be off by 2–4× (10-bit Quick Sync measured
     // 4× over the guess): only refuse when even 1.5× the estimate does not fit
     let need_temp = need_temp + need_temp / 2 + SPACE_MARGIN;
@@ -671,7 +676,9 @@ pub fn build_chapters(out: &OutputPlan, mode: Chapters) -> Vec<Chapter> {
 
 /// Integrated loudness (LUFS) from ebur128's summary on stderr.
 pub fn parse_ebur128(stderr: &str) -> Option<f64> {
-    let mut lines = stderr.lines().skip_while(|l| !l.contains("Integrated loudness:"));
+    let mut lines = stderr
+        .lines()
+        .skip_while(|l| !l.contains("Integrated loudness:"));
     lines.find_map(|l| {
         let v = l.trim().strip_prefix("I:")?;
         v.trim().trim_end_matches("LUFS").trim().parse().ok()
@@ -727,7 +734,9 @@ fn loudness_gains(
     for (_, segs) in &clips {
         // the clip's value: per clip, and for its segments that are too short
         let per_clip = settings.loudness == Loudness::PerClip
-            || segs.iter().any(|&i| out.segments[i].duration() < MIN_MEASURE_SECS);
+            || segs
+                .iter()
+                .any(|&i| out.segments[i].duration() < MIN_MEASURE_SECS);
         let clip_gain = if per_clip {
             let items: Vec<_> = segs.iter().map(|&i| audio[i].clone()).collect();
             measure(&items, &out.segments[segs[0]].clip_title)?
@@ -953,8 +962,14 @@ mod tests {
         let out = &plan.outputs[0];
         let ch = build_chapters(out, Chapters::PerClip);
         assert_eq!(ch.len(), 2);
-        assert_eq!((ch[0].start, ch[0].end, ch[0].title.as_str()), (0.0, 15.0, "Intro"));
-        assert_eq!((ch[1].start, ch[1].end, ch[1].title.as_str()), (15.0, 35.0, "Match"));
+        assert_eq!(
+            (ch[0].start, ch[0].end, ch[0].title.as_str()),
+            (0.0, 15.0, "Intro")
+        );
+        assert_eq!(
+            (ch[1].start, ch[1].end, ch[1].title.as_str()),
+            (15.0, 35.0, "Match")
+        );
         let ch = build_chapters(out, Chapters::PerSegment);
         assert_eq!(ch.len(), 3);
         assert_eq!(ch[1].title, "Intro – 3");

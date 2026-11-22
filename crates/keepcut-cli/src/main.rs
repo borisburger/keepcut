@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use keepcut_core::encoders::{self, EncoderSet};
 use keepcut_core::exec::{self, ExecOptions};
-use keepcut_core::fsutil;
 use keepcut_core::ffmpeg::{CancelToken, LogLine, LogSink, Tools};
+use keepcut_core::fsutil;
 use keepcut_core::model::{
     Chapters, EncodingMode, Loudness, OutputMode, Project, Quality, Resolution, VideoCodec,
 };
@@ -271,9 +271,12 @@ fn main() -> Result<()> {
                 for out in &plan.outputs {
                     let ch = exec::build_chapters(out, p.export.chapters);
                     let (text, warn) = keepcut_core::chapters::youtube_block(&ch);
-                    println!("
+                    println!(
+                        "
 YouTube chapters for {}:
-{text}", out.path.display());
+{text}",
+                        out.path.display()
+                    );
                     for w in warn {
                         println!("  (YouTube: {w})");
                     }
@@ -341,7 +344,11 @@ fn load(
     if ov.fps.is_some() {
         x.full.fps = ov.fps;
     }
-    if let Some(q) = ov.crf.map(Quality::Crf).or(ov.bitrate.map(Quality::BitrateKbps)) {
+    if let Some(q) = ov
+        .crf
+        .map(Quality::Crf)
+        .or(ov.bitrate.map(Quality::BitrateKbps))
+    {
         x.full.quality = q.clone();
         x.smart_quality = q;
     }

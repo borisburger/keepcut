@@ -1,6 +1,6 @@
 # Keepcut — Implementation Plan
 
-Status: **Phase 0A (export pipeline) and Phase 0B (player) spikes done** on the author's Windows laptop (results and decisions: §3.3–3.5); **Phase 1 (MVP GUI) built, awaiting the author's hands-on test; Phase 2 (export completeness) done** (2026-11-18); **Phase 3 (comfort features) first pass done** (2026-11-22). Open spike items are listed in §11. Plan written and finalized 2026-11-17.
+Status: **Phase 0A (export pipeline) and Phase 0B (player) spikes done** on the author's Windows laptop (results and decisions: §3.3–3.5); **Phase 1 (MVP GUI) built, awaiting the author's hands-on test; Phase 2 (export completeness) done** (2026-11-18); **Phase 3 (comfort features) done; Phase 4 (packaging) first pass done** (2026-11-22). Open spike items are listed in §11. Plan written and finalized 2026-11-17.
 This document is self-contained: it assumes no access to the planning conversation.
 
 ### Start here (for the implementer)
@@ -756,7 +756,7 @@ Smart mode is where 4K pays off most: copied parts cost nothing extra at 4K. The
 - Unsigned builds trigger SmartScreen ("More info → Run anyway"); code signing is optional later.
 
 ### Linux
-- **Flatpak** (primary):
+- **Flatpak** (primary; implemented in Phase 4, see §11):
   - runtime `org.freedesktop.Platform` (current version), SDK extension `rust-stable`;
   - build modules for ffmpeg (with x264, x265, nv-codec-headers, VAAPI) and mpv/libmpv (use Flathub's `io.mpv.Mpv` manifest as reference);
   - cargo sources vendored via `flatpak-cargo-generator`.
@@ -922,7 +922,7 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
 - Loudness normalization (§6.9); chapters + YouTube block (§6.13).
 - Project save/open, autosave + recovery (§9); missing-file relink.
 - Waveform lane; clip thumbnails; Settings dialog.
-- **Status (2026-11-22, first pass, not yet committed):** all items above implemented.
+- **Status (2026-11-22, first pass; committed as "Phase 3: comfort features"):** all items above implemented.
   - **Loudness (§6.9, `exec::loudness_gains`):**
     - Measured with `ebur128` on the FLAC pieces, which runs at ~500× real time (a concat list per unit). This replaces the planned `loudnorm` analysis, which gives the same BS.1770 integrated loudness more slowly.
     - Per clip: all of that clip's pieces in the output. Per segment: each segment, except segments under 3 s, which use their clip's value. Whole: the output.
@@ -975,6 +975,28 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
 
 ### Phase 4 — Packaging
 - Windows zip + installer; Linux Flatpak; macOS best-effort; CI release workflow; README with install instructions per distro.
+- **Status (2026-11-22, first pass, not yet committed):**
+  - **App icon:** `packaging/icons/keepcut.svg` (a clip with a removed part, joined below), rendered with Inkscape to PNGs and a multi-size `keepcut.ico`. Embedded in `keepcut.exe` with version info (`crates/keepcut/build.rs`, `winresource`) and set as the window icon; the window's app id is `io.github.borisburger.Keepcut` (Wayland/X11 matching with the .desktop file).
+  - **Windows** (`packaging/windows/`):
+    - `fetch-ffmpeg.ps1`: gyan.dev essentials 9.1 from the GitHub mirror `GyanD/codexffmpeg`, SHA-256 pinned (matches gyan.dev's published hash).
+    - `package.ps1`: release build, staging (keepcut.exe, keepcut-cli.exe, libmpv-2.dll, ffmpeg.exe, ffprobe.exe, `licenses/`, README.txt with source locations), portable zip, then the installer.
+    - `keepcut.iss` (Inno Setup 7.1): per-user install by default (no admin; "all users" offered), Start menu entry, optional desktop icon, `.keepcut` association (task, on by default), "Open with" for mp4/mov/mkv, uninstaller.
+    - Sizes: unpacked ~360 MB (libmpv 126 MB, ffmpeg 111 MB, ffprobe 110 MB: three static copies of FFmpeg). Zip 134 MB. **Installer 60 MB** with `LZMADictionarySize=256 MB`, which lets LZMA store the nearly identical ffprobe.exe almost for free (98 MB with the default 64 MB dictionary).
+    - Verified: silent per-user install into a scratch folder, scripted run of the installed app (bundled ffmpeg 9.1 used, hardware encoders detected, export verified 180/180 frames), silent uninstall removes files, registry keys and the Start menu entry.
+    - mpv's "Clang" Windows zip is the mpv.exe player only (no libmpv), so it isn't an option for embedding.
+  - **Linux Flatpak** (`packaging/linux/`): manifest `io.github.borisburger.Keepcut.yml` on Freedesktop 26.08 + rust-stable; builds nv-codec-headers, x264, x265 4.2, ffmpeg 9.1 (GPL, NVENC/NVDEC, VA-API), libplacebo 7.387 (OpenGL only), libass 0.17.5, libmpv 0.42.0; Keepcut fetched crates with network during the build (Flathub would need `flatpak-cargo-generator`). Permissions: wayland/x11, pulseaudio, `--device=all` (NVENC needs /dev/nvidia*), `--filesystem=host`. Desktop file, AppStream metainfo, MIME type `application/x-keepcut`, hicolor icons. `build-flatpak.sh` builds outside the source tree and exports `dist/Keepcut-<ver>-linux-x86_64.flatpak`; with flatpak-builder < 1.3 (AlmaLinux 9) it turns off appstream-compose, which current SDKs no longer ship.
+    - Fix found while building: libplacebo and mpv installed to `/app/lib64` without `--libdir=lib`.
+    - Fix found while testing: libmpv without Lua has no `osc` option, so setting it failed and the player couldn't start. `osc` is now optional, and a failing mpv option is logged by name.
+    - Built in WSL AlmaLinux 9 (flatpak 1.12.9, flatpak-builder 1.2.3): bundle 20 MB. Verified inside the sandbox (`flatpak build`): `keepcut-cli` runs, ffmpeg 9.1 has libx264/libx265/NVENC/VA-API, `keepcut` links `/app/lib/libmpv.so.2`, mpv starts, encoder detection works, and a smart-cut CLI export with loudness normalization verifies (3.400 s, 102/102 frames, A−V 0).
+    - **Not verified:** the GUI on a real Linux desktop. Under WSLg the sandboxed app loses its Wayland connection within milliseconds ("Broken pipe"), and WSLg's X socket isn't in `/tmp/.X11-unix`; this looks WSLg-specific. Needs a test on a Linux machine (Ubuntu/Fedora/AlmaLinux, X11 and Wayland; NVIDIA and Intel/AMD).
+  - **macOS** (`packaging/macos/package.sh`, best effort, CI only): Homebrew mpv + ffmpeg, `dylibbundler` into `Keepcut.app/Contents/Frameworks`, icns, Info.plist with document types, ad-hoc signature, zip. Untested here.
+  - **CI** (`.github/workflows/`): `ci.yml` on push/PR: Linux (fmt, clippy -D warnings, tests with a BtbN static ffmpeg 9.0, because Ubuntu's 6.1 lacks `-/af`), Windows (clippy, tests with the fetched libmpv/ffmpeg), macOS (tests, allowed to fail). `release.yml` on `v*` tags: Windows zip + installer, Flatpak (flathub-infra container + flatpak-builder action), macOS zip (allowed to fail), then a **draft** GitHub release with all files.
+  - `cargo fmt` run over the workspace (the code wasn't rustfmt-clean before; CI now checks it).
+  - **README.md:** features, install per platform and distro, build from source, licenses.
+  - **Not done / open:**
+    - The CI and release workflows haven't run yet (nothing pushed).
+    - Size: a slim libmpv built against shared FFmpeg DLLs (also used by ffmpeg/ffprobe) would leave one FFmpeg in the package (installer maybe ~30–35 MB), at the cost of building mpv for Windows in CI.
+    - Code signing (Windows), notarization (macOS), Flathub submission.
 
 ---
 

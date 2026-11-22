@@ -423,9 +423,9 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
             };
             let stem = trimmed(&clip.chapter_title).unwrap_or_else(|| info.file_stem());
             let chapter_title = trimmed(&seg.chapter_title).unwrap_or_else(|| {
-                    let kept = clip.segments.as_ref().map_or(1, Vec::len);
-                    crate::chapters::default_segment_title(&stem, *si, kept)
-                });
+                let kept = clip.segments.as_ref().map_or(1, Vec::len);
+                crate::chapters::default_segment_title(&stem, *si, kept)
+            });
             segments.push(SegmentPlan {
                 clip_idx: *ci,
                 seg_idx: *si,
@@ -537,11 +537,12 @@ fn estimate(out: &OutputPlan, infos: &[MediaInfo], audio_kbps: u32) -> (u64, u64
                     _ => {
                         let px = (enc.width.max(1) as f64 * enc.height.max(1) as f64)
                             / (v.width.max(1) as f64 * v.height.max(1) as f64);
-                        let out_codec = encoders::codec_of_encoder(&enc.encoder).map_or("h264", |c| match c {
-                            VideoCodec::H264 => "h264",
-                            VideoCodec::Hevc => "hevc",
-                            VideoCodec::Av1 => "av1",
-                        });
+                        let out_codec =
+                            encoders::codec_of_encoder(&enc.encoder).map_or("h264", |c| match c {
+                                VideoCodec::H264 => "h264",
+                                VideoCodec::Hevc => "hevc",
+                                VideoCodec::Av1 => "av1",
+                            });
                         rate * d * px * codec_cost(out_codec) / codec_cost(&v.codec_name)
                     }
                 },
@@ -1306,7 +1307,10 @@ mod tests {
             v.pix_fmt = "yuv420p10le".into();
         }
         let infos = vec![info("/x/a.mp4", 1920, 1080, &pk, 0), b];
-        let mut p = project(vec![("/x/a.mp4", None), ("/x/b.mp4", Some(vec![(0.0, 1.0)]))]);
+        let mut p = project(vec![
+            ("/x/a.mp4", None),
+            ("/x/b.mp4", Some(vec![(0.0, 1.0)])),
+        ]);
         p.export.encoding = EncodingMode::Full;
         p.export.full.codec = VideoCodec::Hevc;
         p.export.full.resolution = Resolution::ShortSide(720);
@@ -1325,7 +1329,11 @@ mod tests {
         assert_eq!((encs[0].width, encs[0].height), (1280, 720));
         assert_eq!(encs[0].pix_fmt, "yuv420p");
         assert_eq!(encs[0].encoder, "libx265");
-        assert!(plan.clips[0].summary.contains("1920×1080 scaled to 1280×720"));
+        assert!(
+            plan.clips[0]
+                .summary
+                .contains("1920×1080 scaled to 1280×720")
+        );
         assert!(plan.outputs[0].est_bytes > 0 && plan.outputs[0].est_temp_bytes > 0);
 
         // separate files: each output follows its own source (b stays 10-bit)
@@ -1342,19 +1350,45 @@ mod tests {
     #[test]
     fn auto_encoder_choice() {
         let set = EncoderSet {
-            working: vec!["h264_nvenc".into(), "hevc_qsv".into(), "libx264".into(), "libx265".into()],
+            working: vec![
+                "h264_nvenc".into(),
+                "hevc_qsv".into(),
+                "libx264".into(),
+                "libx265".into(),
+            ],
             failed: vec![],
         };
         // screen recordings below 4K: software; camera or 4K: hardware
-        assert_eq!(pick_encoder(VideoCodec::H264, None, true, 1080, &set), "libx264");
-        assert_eq!(pick_encoder(VideoCodec::H264, None, true, 2160, &set), "h264_nvenc");
-        assert_eq!(pick_encoder(VideoCodec::Hevc, None, false, 1080, &set), "hevc_qsv");
+        assert_eq!(
+            pick_encoder(VideoCodec::H264, None, true, 1080, &set),
+            "libx264"
+        );
+        assert_eq!(
+            pick_encoder(VideoCodec::H264, None, true, 2160, &set),
+            "h264_nvenc"
+        );
+        assert_eq!(
+            pick_encoder(VideoCodec::Hevc, None, false, 1080, &set),
+            "hevc_qsv"
+        );
         // a choice for the other codec means the same family, if that one works
-        assert_eq!(pick_encoder(VideoCodec::Hevc, Some("h264_qsv"), true, 1080, &set), "hevc_qsv");
-        assert_eq!(pick_encoder(VideoCodec::Hevc, Some("libx264"), false, 1080, &set), "libx265");
+        assert_eq!(
+            pick_encoder(VideoCodec::Hevc, Some("h264_qsv"), true, 1080, &set),
+            "hevc_qsv"
+        );
+        assert_eq!(
+            pick_encoder(VideoCodec::Hevc, Some("libx264"), false, 1080, &set),
+            "libx265"
+        );
         // ... otherwise Auto (hevc_nvenc is not in the set)
-        assert_eq!(pick_encoder(VideoCodec::Hevc, Some("h264_nvenc"), false, 1080, &set), "hevc_qsv");
-        assert_eq!(pick_encoder(VideoCodec::H264, Some("libx264"), false, 2160, &set), "libx264");
+        assert_eq!(
+            pick_encoder(VideoCodec::Hevc, Some("h264_nvenc"), false, 1080, &set),
+            "hevc_qsv"
+        );
+        assert_eq!(
+            pick_encoder(VideoCodec::H264, Some("libx264"), false, 2160, &set),
+            "libx264"
+        );
     }
 
     #[test]

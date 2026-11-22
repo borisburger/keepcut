@@ -11,8 +11,8 @@ use keepcut_core::encoders::EncoderSet;
 use keepcut_core::exec::{self, ExecOptions};
 use keepcut_core::ffmpeg::{self, CancelToken, LogSink, RunOpts, Tools};
 use keepcut_core::model::{
-    Chapters, Clip, EncodingMode, ExportSettings, Loudness, OutputMode, Project, Quality, Resolution,
-    Segment, VideoCodec,
+    Chapters, Clip, EncodingMode, ExportSettings, Loudness, OutputMode, Project, Quality,
+    Resolution, Segment, VideoCodec,
 };
 use keepcut_core::plan::{self, PieceKind};
 use keepcut_core::probe::{self, MediaInfo};
@@ -143,8 +143,18 @@ fn full_hevc_10bit_downscale_constant_fps() {
         "hevc10.mp4",
         SRC_360,
         &[
-            "-t", "6", "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
-            "-x265-params", "log-level=error", "-c:a", "aac",
+            "-t",
+            "6",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-x265-params",
+            "log-level=error",
+            "-c:a",
+            "aac",
         ],
     );
     let small43 = make_clip(
@@ -172,7 +182,10 @@ fn full_hevc_10bit_downscale_constant_fps() {
     let m = probe::probe(&t, &paths[0], None, None).unwrap();
     let v = m.video.unwrap();
     // target = the 10-bit HEVC clip (longer kept part): 640×360 → 426×240, 10-bit kept
-    assert_eq!((v.codec_name.as_str(), v.width, v.height), ("hevc", 426, 240));
+    assert_eq!(
+        (v.codec_name.as_str(), v.width, v.height),
+        ("hevc", 426, 240)
+    );
     assert_eq!(v.pix_fmt, "yuv420p10le");
     assert_eq!(m.frames.len(), 7 * 25, "constant 25 fps over 7 s");
 }
@@ -181,7 +194,20 @@ fn full_hevc_10bit_downscale_constant_fps() {
 fn per_clip_and_per_segment_outputs() {
     let Some(t) = tools() else { return };
     let dir = tempfile::tempdir().unwrap();
-    let enc = ["-t", "8", "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-g", "30", "-c:a", "aac"];
+    let enc = [
+        "-t",
+        "8",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-bf",
+        "0",
+        "-g",
+        "30",
+        "-c:a",
+        "aac",
+    ];
     let a = make_clip(&t, dir.path(), "a.mp4", SRC_360, &enc);
     let b = make_clip(&t, dir.path(), "b.mp4", SRC_360, &enc);
     let clips = || vec![clip(&a, &[(0.7, 2.1), (3.0, 5.0)]), clip(&b, &[(2.5, 7.9)])];
@@ -202,7 +228,10 @@ fn per_clip_and_per_segment_outputs() {
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, ["a - part 01.mp4", "a - part 02.mp4", "b - part 01.mp4"]);
+    assert_eq!(
+        names,
+        ["a - part 01.mp4", "a - part 02.mp4", "b - part 01.mp4"]
+    );
     // exporting again never overwrites
     let (_, again) = export_with(&t, clips(), settings(OutputMode::PerClip));
     assert!(again[0].ends_with("a - cut (2).mp4"));
@@ -443,10 +472,40 @@ fn lufs(t: &Tools, file: &Path, start: f64, dur: f64) -> f64 {
 fn loudness_per_clip_and_chapters() {
     let Some(t) = tools() else { return };
     let dir = tempfile::tempdir().unwrap();
-    let enc = ["-t", "8", "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-g", "30", "-c:a", "aac", "-b:a", "192k"];
+    let enc = [
+        "-t",
+        "8",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-bf",
+        "0",
+        "-g",
+        "30",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+    ];
     let tone = |name: &str, db: i32| {
         let src = format!("sine=f=440:r=48000,volume={db}dB");
-        make_clip(&t, dir.path(), name, &["-f", "lavfi", "-i", "testsrc2=s=640x360:r=15", "-f", "lavfi", "-i", &src], &enc)
+        make_clip(
+            &t,
+            dir.path(),
+            name,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=640x360:r=15",
+                "-f",
+                "lavfi",
+                "-i",
+                &src,
+            ],
+            &enc,
+        )
     };
     let quiet = tone("quiet.mp4", -14);
     let loud = tone("loud.mp4", 10);
@@ -461,7 +520,10 @@ fn loudness_per_clip_and_chapters() {
         ..Default::default()
     };
     let before = (lufs(&t, &quiet, 0.0, 8.0), lufs(&t, &loud, 0.0, 8.0));
-    assert!(before.0 < -28.0 && before.1 > -13.0, "test tones: {before:?}");
+    assert!(
+        before.0 < -28.0 && before.1 > -13.0,
+        "test tones: {before:?}"
+    );
     let (_, paths) = export_with(&t, clips, settings);
     let out = &paths[0];
     // each clip's part lands near the target (the limiter only touches peaks)
@@ -471,11 +533,25 @@ fn loudness_per_clip_and_chapters() {
     // chapters: one per clip, the first with its custom title
     let cmd = t
         .ffprobe()
-        .args(["-v", "error", "-show_entries", "chapter=start_time,end_time:chapter_tags=title", "-of", "csv=p=0"])
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "chapter=start_time,end_time:chapter_tags=title",
+            "-of",
+            "csv=p=0",
+        ])
         .arg(out);
     let o = ffmpeg::run_checked(&cmd, RunOpts::default()).unwrap();
-    let lines: Vec<String> = String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect();
-    assert_eq!(lines, ["0.000000,6.000000,Intro", "6.000000,11.000000,loud"], "{lines:?}");
+    let lines: Vec<String> = String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        ["0.000000,6.000000,Intro", "6.000000,11.000000,loud"],
+        "{lines:?}"
+    );
 }
 
 #[test]
@@ -489,11 +565,37 @@ fn thumbnail_and_waveform() {
         dir.path(),
         "w.mp4",
         &[
-            "-f", "lavfi", "-i", "testsrc2=s=320x240:r=15",
-            "-f", "lavfi", "-i", "aevalsrc='if(gte(t,2),0.5*sin(2*PI*440*t),0)':s=48000",
-            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=15",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc='if(gte(t,2),0.5*sin(2*PI*440*t),0)':s=48000",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
         ],
-        &["-t", "4", "-map", "0", "-map", "1", "-map", "2", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-c:a", "aac"],
+        &[
+            "-t",
+            "4",
+            "-map",
+            "0",
+            "-map",
+            "1",
+            "-map",
+            "2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "30",
+            "-c:a",
+            "aac",
+        ],
     );
     let info = probe::probe(&t, &a, None, None).unwrap();
     let rgba = assets::thumbnail(&t, &info).unwrap();
@@ -501,11 +603,21 @@ fn thumbnail_and_waveform() {
     // 4:3 in 16:9: black bars left and right, picture in the middle
     assert_eq!(&rgba[..3], &[0, 0, 0]);
     let mid = ((assets::THUMB_H / 2 * assets::THUMB_W + assets::THUMB_W / 2) * 4) as usize;
-    assert!(rgba[mid..mid + 3].iter().any(|&c| c > 20), "picture in the middle");
+    assert!(
+        rgba[mid..mid + 3].iter().any(|&c| c > 20),
+        "picture in the middle"
+    );
     let peaks = assets::waveform(&t, &info, &CancelToken::new()).unwrap();
-    assert!((395..=405).contains(&peaks.len()), "4 s at 100/s: {}", peaks.len());
+    assert!(
+        (395..=405).contains(&peaks.len()),
+        "4 s at 100/s: {}",
+        peaks.len()
+    );
     assert!(peaks[20..180].iter().all(|&p| p < 3), "silence first");
-    assert!(peaks[220..380].iter().all(|&p| p > 100), "then the tone (0.5 ≈ 127)");
+    assert!(
+        peaks[220..380].iter().all(|&p| p > 100),
+        "then the tone (0.5 ≈ 127)"
+    );
 }
 
 /// Runs every `samples/projects/*.json` in both modes (local corpus; slow).

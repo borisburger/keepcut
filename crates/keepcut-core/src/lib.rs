@@ -13,8 +13,8 @@ pub mod fsutil;
 pub mod history;
 pub mod model;
 pub mod plan;
-pub mod projfile;
 pub mod probe;
+pub mod projfile;
 pub mod timefmt;
 pub mod verify;
 

@@ -1,0 +1,175 @@
+# Flatpak manifest for Keepcut.
+#
+# Build a single-file bundle (from the repo root, on Linux with flatpak-builder):
+#   packaging/linux/build-flatpak.sh
+#
+# ffmpeg (GPL: x264, x265, NVENC, VA-API) and libmpv are built here, because the runtime's
+# FFmpeg lacks the encoders Keepcut needs and the runtime has no ffmpeg/ffprobe binaries.
+app-id: io.github.borisburger.Keepcut
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: keepcut
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  # GPU: OpenGL rendering, VA-API, and NVENC/NVDEC (which need /dev/nvidia*, not just /dev/dri)
+  - --device=all
+  # Clips can be anywhere, and outputs are written next to them.
+  - --filesystem=host
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/man
+  - /share/doc
+  - '*.la'
+  - '*.a'
+
+modules:
+  - name: nv-codec-headers
+    buildsystem: simple
+    build-commands:
+      - make PREFIX=/app install
+    cleanup:
+      - '*'
+    sources:
+      - type: git
+        url: https://github.com/FFmpeg/nv-codec-headers.git
+        tag: n13.0.19.0
+        commit: e844e5b26f46bb77479f063029595293aa8f812d
+
+  - name: x264
+    config-opts:
+      - --enable-shared
+      - --enable-pic
+      - --disable-cli
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/x264.git
+        branch: stable
+        commit: b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+
+  - name: x265
+    buildsystem: cmake-ninja
+    subdir: source
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+      - -DENABLE_CLI=OFF
+      - -DENABLE_SHARED=ON
+    sources:
+      - type: archive
+        url: https://download.videolan.org/videolan/x265/x265_4.2.tar.gz
+        sha256: 40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210
+
+  - name: ffmpeg
+    config-opts:
+      - --enable-gpl
+      - --enable-version3
+      - --enable-shared
+      - --disable-static
+      - --disable-doc
+      - --disable-ffplay
+      - --enable-libx264
+      - --enable-libx265
+      - --enable-libdav1d
+      - --enable-libopus
+      - --enable-libvpx
+      - --enable-libmp3lame
+      - --enable-vaapi
+      - --enable-libdrm
+      - --enable-ffnvcodec
+      - --enable-nvenc
+      - --enable-nvdec
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz
+        sha256: 1a4d394ae63d190a526cd052eb4415c156b5c5e2df37efab41a7de0b8fde2433
+
+  - name: libplacebo
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib
+      - -Dopengl=enabled
+      - -Dvulkan=disabled
+      - -Dshaderc=disabled
+      - -Dglslang=disabled
+      - -Dlcms=enabled
+      - -Ddemos=false
+      - -Dtests=false
+    sources:
+      - type: git
+        url: https://github.com/haasn/libplacebo.git
+        tag: v7.387.0
+        commit: 275f7dea27924cdd34ab2e6c20e448b6bc4fab65
+
+  - name: libass
+    config-opts:
+      - --disable-static
+      - --disable-libunibreak
+    sources:
+      - type: archive
+        url: https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz
+        sha256: 2dca25c0e0c837ddf00b52011b3f82cac1e4ddd3ad018227806b0c2288864acc
+
+  - name: mpv
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib
+      - -Dlibmpv=true
+      - -Dcplayer=false
+      - -Dlua=disabled
+      - -Djavascript=disabled
+      - -Dvulkan=disabled
+      - -Dmanpage-build=disabled
+      - -Dhtml-build=disabled
+      - -Dpdf-build=disabled
+      - -Dcdda=disabled
+      - -Ddvdnav=disabled
+      - -Dlibbluray=disabled
+    sources:
+      - type: git
+        url: https://github.com/mpv-player/mpv.git
+        tag: v0.42.0
+        commit: b0841e8c4d156b8403dc1876c4cbd9011eb583f3
+
+  - name: keepcut
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/keepcut/cargo
+        LIBRARY_PATH: /app/lib
+      # Crates are fetched during the build (fine for our own bundle; Flathub would need
+      # vendored cargo sources from flatpak-cargo-generator instead).
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --release --locked -p keepcut -p keepcut-cli
+      - install -Dm755 target/release/keepcut target/release/keepcut-cli -t /app/bin/
+      - install -Dm644 packaging/linux/io.github.borisburger.Keepcut.desktop -t /app/share/applications/
+      - install -Dm644 packaging/linux/io.github.borisburger.Keepcut.metainfo.xml -t /app/share/metainfo/
+      - install -Dm644 packaging/linux/io.github.borisburger.Keepcut.mime.xml /app/share/mime/packages/io.github.borisburger.Keepcut.xml
+      - install -Dm644 packaging/icons/keepcut.svg /app/share/icons/hicolor/scalable/apps/io.github.borisburger.Keepcut.svg
+      - |
+        for s in 16 32 48 64 128 256; do
+          install -Dm644 packaging/icons/keepcut-$s.png /app/share/icons/hicolor/${s}x${s}/apps/io.github.borisburger.Keepcut.png
+        done
+      - install -Dm644 LICENSE /app/share/licenses/io.github.borisburger.Keepcut/LICENSE
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - third_party
+          - samples
+          - dist
+          - .git
+          - .flatpak-builder
+          - flatpak_app
+          - repo

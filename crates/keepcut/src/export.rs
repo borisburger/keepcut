@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
-use keepcut_core::exec::{self, ExecOptions, OutputResult};
-use keepcut_core::ffmpeg::{CancelToken, LogLine, LogSink};
+use keepcut_core::chapters::{self, Chapter};
 use keepcut_core::compat::Signature;
 use keepcut_core::encoders::{self, EncoderSet};
-use keepcut_core::chapters::{self, Chapter};
+use keepcut_core::exec::{self, ExecOptions, OutputResult};
+use keepcut_core::ffmpeg::{CancelToken, LogLine, LogSink};
 use keepcut_core::fsutil;
 use keepcut_core::model::{
     AudioTracks, Chapters, ContentType, EncodingMode, FullEncodeSettings, Loudness, OutputMode,
@@ -927,10 +927,18 @@ fn quality_ui(ui: &mut egui::Ui, id: &str, q: &mut Quality) -> bool {
 }
 
 /// Codec, encoder, quality, resolution, frame rate and content type (§6.0).
-fn full_options(ui: &mut egui::Ui, f: &mut FullEncodeSettings, set: &EncoderSet, changed: &mut bool) {
+fn full_options(
+    ui: &mut egui::Ui,
+    f: &mut FullEncodeSettings,
+    set: &EncoderSet,
+    changed: &mut bool,
+) {
     ui.horizontal(|ui| {
         ui.label("Codec");
-        *changed |= ui.radio_value(&mut f.codec, VideoCodec::H264, "H.264").on_hover_text("Plays everywhere").changed();
+        *changed |= ui
+            .radio_value(&mut f.codec, VideoCodec::H264, "H.264")
+            .on_hover_text("Plays everywhere")
+            .changed();
         *changed |= ui
             .radio_value(&mut f.codec, VideoCodec::Hevc, "HEVC (H.265)")
             .on_hover_text("About 30% smaller at the same quality; keeps 10-bit sources 10-bit")

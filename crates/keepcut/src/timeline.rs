@@ -2,9 +2,9 @@
 //! playhead; click/drag to seek, drag edges to trim, Ctrl+wheel to zoom.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use keepcut_core::{assets, edit};
 use keepcut_core::probe::FrameIndex;
 use keepcut_core::timefmt;
+use keepcut_core::{assets, edit};
 
 use crate::app::{App, Drag, Edge, Loaded};
 
@@ -54,7 +54,11 @@ impl App {
         };
 
         // waveform lane under the bar (clips with audio, §8.3)
-        let lane_h = if info.audio.is_empty() { 0.0 } else { WAVE_LANE };
+        let lane_h = if info.audio.is_empty() {
+            0.0
+        } else {
+            WAVE_LANE
+        };
         let (rect, resp) = ui.allocate_exact_size(
             vec2(ui.available_width(), 64.0 + lane_h),
             Sense::click_and_drag(),
@@ -148,7 +152,11 @@ impl App {
                         let h = assets::wave_height(peaks, t0, t1) * half;
                         if h > 0.3 {
                             let kept = edit::segment_at(&segs, (t0 + t1) / 2.0).is_some();
-                            let col = if kept { WAVE_KEPT } else { vis.weak_text_color() };
+                            let col = if kept {
+                                WAVE_KEPT
+                            } else {
+                                vis.weak_text_color()
+                            };
                             painter.line_segment(
                                 [pos2(x + 0.5, mid - h), pos2(x + 0.5, mid + h)],
                                 Stroke::new(1.0, col),

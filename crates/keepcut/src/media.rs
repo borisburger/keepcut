@@ -135,7 +135,11 @@ fn cache_file(kind: Kind, info: &MediaInfo) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (&info.path, info.file_size, info.file_mtime).hash(&mut h);
-    crate::config::dirs().map(|d| d.cache_dir().join(kind.dir()).join(format!("{:016x}", h.finish())))
+    crate::config::dirs().map(|d| {
+        d.cache_dir()
+            .join(kind.dir())
+            .join(format!("{:016x}", h.finish()))
+    })
 }
 
 type Queue = Arc<(Mutex<VecDeque<Arc<MediaInfo>>>, Condvar)>;

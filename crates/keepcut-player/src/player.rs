@@ -120,8 +120,18 @@ impl Player {
                 ("demuxer-max-bytes", "500MiB"),
                 ("demuxer-max-back-bytes", "300MiB"),
             ];
+            // Options that a libmpv built without some features doesn't have: "osc" is the
+            // Lua on-screen controller (absent with -Dlua=disabled, as in the Flatpak).
+            const OPTIONAL: &[&str] = &["osc"];
             for (k, v) in opts {
-                init.set_property(k, *v)?;
+                if let Err(e) = init.set_property(k, *v) {
+                    if OPTIONAL.contains(k) {
+                        tracing::debug!("mpv option {k}={v} not available: {e}");
+                        continue;
+                    }
+                    tracing::error!("mpv option {k}={v}: {e}");
+                    return Err(e);
+                }
             }
             Ok(())
         })

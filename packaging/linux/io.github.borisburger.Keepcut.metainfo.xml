@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.borisburger.Keepcut</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Keepcut</name>
+  <summary>Cut and join video clips losslessly</summary>
+  <developer id="io.github.borisburger">
+    <name>Boris Burger</name>
+  </developer>
+  <description>
+    <p>
+      Mark the parts of your clips to keep, then cut and join them without re-encoding.
+      Only the few frames at a cut that does not fall on a keyframe are re-encoded (smart cut),
+      so exports are fast and keep the original quality.
+    </p>
+    <ul>
+      <li>Frame-accurate preview with mpv, including a preview of the joined result</li>
+      <li>Joined or separate outputs, chapters, and a ready-to-paste YouTube chapter list</li>
+      <li>Loudness normalization per clip, per segment, or for the whole output</li>
+      <li>Projects with autosave and recovery</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.borisburger.Keepcut.desktop</launchable>
+  <url type="homepage">https://github.com/borisburger/keepcut</url>
+  <url type="bugtracker">https://github.com/borisburger/keepcut/issues</url>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>keepcut</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-11-22"/>
+  </releases>
+</component>

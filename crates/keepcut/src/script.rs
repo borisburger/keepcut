@@ -237,7 +237,11 @@ impl App {
                 "clip-title" => {
                     // clip-title N TEXT: through the Chapter title dialog's code path
                     let (n, text) = arg.split_once(' ').unwrap_or((arg, ""));
-                    if let Some(c) = n.parse::<usize>().ok().and_then(|i| self.project.clips.get(i)) {
+                    if let Some(c) = n
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|i| self.project.clips.get(i))
+                    {
                         self.title_dialog = Some(crate::clips::TitleDialog {
                             clip: c.id,
                             text: text.to_string(),
@@ -284,7 +288,11 @@ impl App {
                 "relink" => {
                     // relink N PATH (Locate… without the file dialog)
                     let (n, p) = arg.split_once(' ').unwrap_or((arg, ""));
-                    if let Some(c) = n.parse::<usize>().ok().and_then(|i| self.project.clips.get(i)) {
+                    if let Some(c) = n
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|i| self.project.clips.get(i))
+                    {
                         self.relink(c.id, PathBuf::from(p.trim()));
                     }
                     true
@@ -308,9 +316,14 @@ impl App {
                 "print-youtube" => {
                     if let Some(Ok(p)) = &self.plan {
                         for o in &p.outputs {
-                            let ch = keepcut_core::exec::build_chapters(o, self.project.export.chapters);
+                            let ch =
+                                keepcut_core::exec::build_chapters(o, self.project.export.chapters);
                             let (text, warn) = keepcut_core::chapters::youtube_block(&ch);
-                            out(format!("youtube: {} | {} | warnings: {warn:?}", o.path.display(), text.replace('\n', " / ")));
+                            out(format!(
+                                "youtube: {} | {} | warnings: {warn:?}",
+                                o.path.display(),
+                                text.replace('\n', " / ")
+                            ));
                         }
                     }
                     true
@@ -373,7 +386,8 @@ impl App {
     /// loudness off|whole|per-clip|per-segment · lufs N · chapters none|per-clip|per-segment.
     fn set_export_option(&mut self, key: &str, val: &str) -> anyhow::Result<()> {
         use keepcut_core::model::{
-            AudioTracks, Chapters, ContentType, Loudness, OutputMode, Quality, Resolution, VideoCodec,
+            AudioTracks, Chapters, ContentType, Loudness, OutputMode, Quality, Resolution,
+            VideoCodec,
         };
         let quality = |v: &str| -> anyhow::Result<Quality> {
             let (k, n) = v.split_once(' ').unwrap_or((v, ""));
@@ -395,7 +409,13 @@ impl App {
                     _ => anyhow::bail!("joined | per-clip | per-segment"),
                 }
             }
-            "codec" => x.full.codec = if val == "hevc" { VideoCodec::Hevc } else { VideoCodec::H264 },
+            "codec" => {
+                x.full.codec = if val == "hevc" {
+                    VideoCodec::Hevc
+                } else {
+                    VideoCodec::H264
+                }
+            }
             "encoder" => x.full.encoder = enc(val),
             "smart-encoder" => x.smart_encoder = enc(val),
             "quality" => x.full.quality = quality(val)?,
@@ -407,7 +427,13 @@ impl App {
                     None => Resolution::ShortSide(val.trim_end_matches('p').parse()?),
                 }
             }
-            "fps" => x.full.fps = if val == "keep" { None } else { Some(val.parse()?) },
+            "fps" => {
+                x.full.fps = if val == "keep" {
+                    None
+                } else {
+                    Some(val.parse()?)
+                }
+            }
             "content" => {
                 x.full.content = match val {
                     "screen" => ContentType::Screen,
@@ -415,7 +441,13 @@ impl App {
                     _ => ContentType::Auto,
                 }
             }
-            "audio" => x.audio_tracks = if val == "first" { AudioTracks::FirstOnly } else { AudioTracks::MixAll },
+            "audio" => {
+                x.audio_tracks = if val == "first" {
+                    AudioTracks::FirstOnly
+                } else {
+                    AudioTracks::MixAll
+                }
+            }
             "aac" => x.audio_bitrate_kbps = val.parse()?,
             "loudness" => {
                 x.loudness = match val {

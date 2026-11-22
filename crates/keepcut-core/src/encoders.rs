@@ -164,7 +164,8 @@ pub fn detect(
         if out.success() {
             set.working.push(enc.to_string());
         } else {
-            set.failed.push((enc.to_string(), failure_reason(&out.stderr)));
+            set.failed
+                .push((enc.to_string(), failure_reason(&out.stderr)));
         }
     }
     Ok(set)
@@ -195,7 +196,8 @@ pub fn test_encode(
         c = c.args(["-vf", "format=nv12,hwupload"]);
     }
     let out = ffmpeg::run(
-        &c.args(enc.args()).args(["-frames:v", "1", "-f", "null", "-"]),
+        &c.args(enc.args())
+            .args(["-frames:v", "1", "-f", "null", "-"]),
         RunOpts {
             cancel,
             log,
@@ -209,9 +211,17 @@ pub fn test_encode(
 /// cause ("DLL amfrt64.dll failed to open"); the last one is a generic
 /// "Nothing was written…". The `[name @ 0x…] ` prefixes are removed.
 pub fn failure_reason(stderr: &str) -> String {
-    let line = stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed");
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("failed");
     let mut rest = line;
-    while let Some(r) = rest.strip_prefix('[').and_then(|r| r.split_once("] ")).map(|(_, r)| r) {
+    while let Some(r) = rest
+        .strip_prefix('[')
+        .and_then(|r| r.split_once("] "))
+        .map(|(_, r)| r)
+    {
         rest = r.trim_start();
     }
     rest.to_string()
@@ -487,10 +497,22 @@ mod tests {
 
     #[test]
     fn counterparts() {
-        assert_eq!(counterpart("hevc_nvenc", VideoCodec::H264).as_deref(), Some("h264_nvenc"));
-        assert_eq!(counterpart("h264_qsv", VideoCodec::Hevc).as_deref(), Some("hevc_qsv"));
-        assert_eq!(counterpart("libx265", VideoCodec::H264).as_deref(), Some("libx264"));
-        assert_eq!(counterpart("h264_nvenc", VideoCodec::H264).as_deref(), Some("h264_nvenc"));
+        assert_eq!(
+            counterpart("hevc_nvenc", VideoCodec::H264).as_deref(),
+            Some("h264_nvenc")
+        );
+        assert_eq!(
+            counterpart("h264_qsv", VideoCodec::Hevc).as_deref(),
+            Some("hevc_qsv")
+        );
+        assert_eq!(
+            counterpart("libx265", VideoCodec::H264).as_deref(),
+            Some("libx264")
+        );
+        assert_eq!(
+            counterpart("h264_nvenc", VideoCodec::H264).as_deref(),
+            Some("h264_nvenc")
+        );
         assert_eq!(counterpart("h264_videotoolbox", VideoCodec::Av1), None);
         assert_eq!(
             failure_reason("[AMF @ 0000] DLL amfrt64.dll failed to open\n[h264_amf @ 01] x\n"),

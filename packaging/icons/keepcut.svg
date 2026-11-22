@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Keepcut app icon: a clip with a removed part (top), joined into one piece (bottom). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a3442"/>
+      <stop offset="1" stop-color="#171d26"/>
+    </linearGradient>
+    <pattern id="hatch" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="14" height="14" fill="#232b36"/>
+      <rect width="6" height="14" fill="#3d4757"/>
+    </pattern>
+    <clipPath id="strip">
+      <rect x="28" y="70" width="200" height="66" rx="14"/>
+    </clipPath>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <!-- source clip: kept | removed | kept, one strip -->
+  <g clip-path="url(#strip)">
+    <rect x="28" y="70" width="200" height="66" fill="#3478c8"/>
+    <rect x="108" y="70" width="40" height="66" fill="url(#hatch)"/>
+  </g>
+  <!-- cut lines -->
+  <rect x="103" y="54" width="7" height="98" rx="3.5" fill="#f0aa28"/>
+  <rect x="146" y="54" width="7" height="98" rx="3.5" fill="#f0aa28"/>
+  <!-- joined result -->
+  <rect x="48" y="172" width="160" height="44" rx="12" fill="#5aa0f0"/>
+</svg>

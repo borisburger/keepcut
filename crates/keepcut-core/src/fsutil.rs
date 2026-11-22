@@ -78,7 +78,9 @@ mod tests {
 
     #[test]
     fn temp_dir_has_space() {
-        let missing = std::env::temp_dir().join("keepcut-does-not-exist").join("x");
+        let missing = std::env::temp_dir()
+            .join("keepcut-does-not-exist")
+            .join("x");
         assert!(free_space(&missing).is_some_and(|b| b > 0));
         assert_eq!(human_bytes(1_400_000_000), "1.4 GB");
         assert_eq!(human_bytes(820_000_000), "820 MB");

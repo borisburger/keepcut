@@ -52,7 +52,8 @@ impl Tools {
 
     /// The version line of ffmpeg (`ffmpeg version 9.0.2-…`), or the error.
     pub fn version(&self) -> std::result::Result<String, String> {
-        let o = run(&self.ffmpeg().arg("-version"), RunOpts::default()).map_err(|e| e.to_string())?;
+        let o =
+            run(&self.ffmpeg().arg("-version"), RunOpts::default()).map_err(|e| e.to_string())?;
         String::from_utf8_lossy(&o.stdout)
             .lines()
             .next()
