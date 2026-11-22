@@ -304,11 +304,19 @@ impl App {
         // start of a drag: an edge grabs it, otherwise scrub
         // (hit-test where the button went down: drag_started fires only after
         // the pointer has moved a few pixels)
+        let press = ui
+            .input(|i| i.pointer.press_origin())
+            .or(resp.interact_pointer_pos());
+        // the edge where the button went down (a click there seeks exactly to it)
+        let pressed_edge = press.and_then(hover_edge);
+        // the frame at the edge: the first kept frame, or for the end the last kept one
+        // (as while trimming)
+        let edge_time = |(i, edge): (usize, Edge)| match edge {
+            Edge::Start => segs[i].start,
+            Edge::End => fi.prev_frame_time(segs[i].end).unwrap_or(segs[i].end),
+        };
         if resp.drag_started()
-            && let Some(p) = ui
-                .input(|i| i.pointer.press_origin())
-                .or(resp.interact_pointer_pos())
-            && let Some((i, edge)) = hover_edge(p)
+            && let Some((i, edge)) = pressed_edge
         {
             self.selected_seg = Some(segs[i].id);
             self.drag = Some(Drag {
@@ -317,6 +325,7 @@ impl App {
                 edge,
                 before: self.project.clips.clone(),
             });
+            self.seek(edge_time((i, edge)));
         }
 
         if let Some(p) = resp.interact_pointer_pos()
@@ -325,10 +334,20 @@ impl App {
             let shift = ui.input(|i| i.modifiers.shift);
             let raw = t_of(p.x);
             if let Some(d) = &self.drag {
-                if d.clip == id {
+                // a press held without moving (egui starts the drag after a moment) leaves
+                // the edge where it is rather than snapping it to the pointer
+                let moved = press.is_some_and(|o| o.x != p.x);
+                if d.clip == id && moved {
                     let (seg_id, edge) = (d.seg, d.edge);
                     self.trim_edge(id, seg_id, edge, raw, shift);
                 }
+            } else if resp.clicked()
+                && let Some((i, edge)) = pressed_edge
+            {
+                // a click on a segment edge (the pointer shows the resize cursor there)
+                // goes exactly to that edge, not to the frame under the pointer
+                self.selected_seg = Some(segs[i].id);
+                self.seek(edge_time((i, edge)));
             } else {
                 let t = fi.snap(raw);
                 if resp.clicked()
