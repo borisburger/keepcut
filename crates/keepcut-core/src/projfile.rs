@@ -18,6 +18,9 @@ struct ProjectFile {
     /// Per clip: the path relative to the project file's folder, if inside it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     relative_paths: Vec<Option<PathBuf>>,
+    /// The soundtrack's path relative to the project file's folder, if inside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    soundtrack_relative_path: Option<PathBuf>,
 }
 
 /// Serializes a project for `path` (relative paths are computed against its folder).
@@ -31,11 +34,16 @@ pub fn to_json(project: &Project, path: Option<&Path>) -> String {
             .collect(),
         None => Vec::new(),
     };
+    let soundtrack_relative_path = base.and_then(|b| {
+        let st = project.soundtrack.as_ref()?;
+        st.path.strip_prefix(b).ok().map(Path::to_path_buf)
+    });
     let mut project = project.clone();
     project.version = PROJECT_VERSION;
     serde_json::to_string_pretty(&ProjectFile {
         project,
         relative_paths,
+        soundtrack_relative_path,
     })
     .expect("a project always serializes")
 }
@@ -61,6 +69,12 @@ pub fn from_json(text: &str, path: Option<&Path>) -> Result<Project> {
         {
             c.path = b.join(r);
         }
+    }
+    if let (Some(b), Some(r), Some(st)) = (base, f.soundtrack_relative_path, p.soundtrack.as_mut())
+        && !st.path.exists()
+        && b.join(&r).is_file()
+    {
+        st.path = b.join(r);
     }
     p.version = PROJECT_VERSION;
     Ok(p)
@@ -125,6 +139,7 @@ mod tests {
         let old = dir.path().join("old");
         std::fs::create_dir_all(old.join("videos")).unwrap();
         std::fs::write(old.join("videos/a.mp4"), b"x").unwrap();
+        std::fs::write(old.join("music.m4a"), b"x").unwrap();
         let outside = PathBuf::from(if cfg!(windows) {
             r"Z:\elsewhere\b.mp4"
         } else {
@@ -135,6 +150,10 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             clips: vec![clip(old.join("videos/a.mp4")), clip(outside.clone())],
             export: Default::default(),
+            soundtrack: Some(crate::model::Soundtrack {
+                path: old.join("music.m4a"),
+                offset: 30.5,
+            }),
         };
         p.export.loudness_target = -16.0;
         let file = old.join("p.keepcut");
@@ -146,12 +165,15 @@ mod tests {
         assert_eq!(back.clips[0].chapter_title.as_deref(), Some("Intro"));
         assert!(!back.clips[0].enabled);
         assert_eq!(back.export.loudness_target, -16.0);
+        assert_eq!(back.soundtrack, p.soundtrack);
         // move the whole folder: the clip inside follows, the outside one doesn't
         let new = dir.path().join("new");
         std::fs::rename(&old, &new).unwrap();
         let moved = load(&new.join("p.keepcut")).unwrap();
         assert_eq!(moved.clips[0].path, new.join("videos").join("a.mp4"));
         assert_eq!(moved.clips[1].path, outside);
+        let st = moved.soundtrack.unwrap();
+        assert_eq!((st.path, st.offset), (new.join("music.m4a"), 30.5));
     }
 
     #[test]

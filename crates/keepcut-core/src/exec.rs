@@ -488,9 +488,43 @@ fn run_output(
         }
     }
 
-    // 2. audio pieces (duration follows the produced video)
+    // 2. audio pieces (duration follows the produced video); with a soundtrack, one piece
+    //    of the soundtrack instead of the clips' sound
     let mut audio_items = Vec::new();
-    for (si, sp) in out.segments.iter().enumerate() {
+    if let Some(st) = &out.soundtrack {
+        cancel.check()?;
+        let d = out.duration();
+        let file = dir.join("soundtrack.flac");
+        let step = "Soundtrack".to_string();
+        tr.report(&step, 0.0);
+        log(LogLine::Info(&format!(
+            "soundtrack {} from {:.3} s replaces the clips' audio",
+            st.path.display(),
+            st.offset
+        )));
+        let cmd = plan::soundtrack_piece_cmd(tools, st, d, &file);
+        {
+            let mut cb =
+                |t: f64| tr.report(&step, (t / d.max(1e-6)).clamp(0.0, 1.0) * d * AUDIO_WEIGHT);
+            ffmpeg::run_checked(
+                &cmd,
+                RunOpts {
+                    cancel: Some(cancel),
+                    log: Some(log),
+                    on_progress: Some(&mut cb),
+                    ..Default::default()
+                },
+            )?;
+        }
+        tr.done += d * AUDIO_WEIGHT;
+        audio_items.push((file, d));
+    }
+    for (si, sp) in out
+        .segments
+        .iter()
+        .enumerate()
+        .filter(|_| out.soundtrack.is_none())
+    {
         cancel.check()?;
         let d = sp.duration();
         let file = dir.join(format!("a{si:04}.flac"));
@@ -514,7 +548,18 @@ fn run_output(
         audio_items.push((file, d));
     }
 
-    // 3. loudness (§6.9): measure, then apply the gains in the final mux
+    // 3. loudness (§6.9): measure, then apply the gains in the final mux. A soundtrack is
+    //    one piece: only "whole output" applies to it.
+    let soundtrack_loudness;
+    let settings = if out.soundtrack.is_some() && settings.loudness != Loudness::Off {
+        soundtrack_loudness = ExportSettings {
+            loudness: Loudness::Whole,
+            ..settings.clone()
+        };
+        &soundtrack_loudness
+    } else {
+        settings
+    };
     let audio_filter = if settings.loudness == Loudness::Off {
         None
     } else {
@@ -897,6 +942,7 @@ mod tests {
                 video_codec: "h264".into(),
                 est_bytes: est,
                 est_temp_bytes: 1000,
+                soundtrack: None,
             }],
             warnings: Vec::new(),
         }

@@ -15,6 +15,7 @@ mod media;
 mod project;
 mod script;
 mod settings;
+mod soundtrack;
 mod timeline;
 
 use std::path::PathBuf;

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{self, RichText};
 use keepcut_core::history::History;
-use keepcut_core::model::{Clip, PROJECT_VERSION, Project};
+use keepcut_core::model::{Clip, PROJECT_VERSION, Project, Soundtrack};
 use keepcut_core::{edit, projfile};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -63,10 +63,10 @@ impl Default for ProjectState {
     fn default() -> Self {
         ProjectState {
             path: None,
-            saved: clips_json(&[]),
+            saved: content_json(&[], None),
             exported: None,
             dirty: false,
-            seen: clips_json(&[]),
+            seen: content_json(&[], None),
             changed_at: None,
             checked_at: Instant::now(),
             title: String::new(),
@@ -80,8 +80,10 @@ impl Default for ProjectState {
     }
 }
 
-fn clips_json(clips: &[Clip]) -> String {
-    serde_json::to_string(clips).unwrap_or_default()
+/// What counts as a change to the project (unsaved changes, autosave): the clips and the
+/// soundtrack.
+fn content_json(clips: &[Clip], soundtrack: Option<&Soundtrack>) -> String {
+    serde_json::to_string(&(clips, soundtrack)).unwrap_or_default()
 }
 
 fn autosave_dir() -> Option<PathBuf> {
@@ -117,12 +119,15 @@ impl App {
         if !self.proj.dirty || self.project.clips.is_empty() {
             return false;
         }
-        let now = clips_json(&self.project.clips);
+        let now = content_json(&self.project.clips, self.project.soundtrack.as_ref());
         !(self.proj.path.is_none() && self.proj.exported.as_deref() == Some(now.as_str()))
     }
 
     pub fn note_export_started(&mut self) {
-        self.proj.exported = Some(clips_json(&self.project.clips));
+        self.proj.exported = Some(content_json(
+            &self.project.clips,
+            self.project.soundtrack.as_ref(),
+        ));
     }
 
     /// Runs `after` now, or first asks whether to save unsaved changes.
@@ -162,6 +167,7 @@ impl App {
             id: Uuid::new_v4(),
             clips: Vec::new(),
             export: Default::default(),
+            soundtrack: None,
         };
         self.config.apply_export_defaults(&mut p.export);
         self.replace_project(p, None);
@@ -213,7 +219,8 @@ impl App {
         match projfile::save(&self.project, path) {
             Ok(()) => {
                 self.proj.path = Some(path.to_path_buf());
-                self.proj.saved = clips_json(&self.project.clips);
+                self.proj.saved =
+                    content_json(&self.project.clips, self.project.soundtrack.as_ref());
                 self.proj.dirty = false;
                 // the autosave is now older than the saved file
                 self.delete_autosave();
@@ -246,7 +253,7 @@ impl App {
         self.close_export_windows();
         self.project = p;
         self.proj.path = path;
-        self.proj.saved = clips_json(&self.project.clips);
+        self.proj.saved = content_json(&self.project.clips, self.project.soundtrack.as_ref());
         self.proj.seen = self.proj.saved.clone();
         self.proj.dirty = false;
         self.proj.exported = None;
@@ -282,6 +289,8 @@ impl App {
                 self.check_changed_source(&f, &info);
             }
         }
+        self.soundtrack_edit = None;
+        self.probe_soundtrack();
         self.fill_whole_clip_segments();
         self.proj.relink_open = missing;
         self.select_clip(self.project.clips.first().map(|c| c.id));
@@ -426,7 +435,7 @@ impl App {
         }
         if self.proj.checked_at.elapsed() >= Duration::from_secs(1) && self.drag.is_none() {
             self.proj.checked_at = Instant::now();
-            let now = clips_json(&self.project.clips);
+            let now = content_json(&self.project.clips, self.project.soundtrack.as_ref());
             self.proj.dirty = now != self.proj.saved;
             if now != self.proj.seen {
                 self.proj.seen = now;
@@ -582,7 +591,8 @@ impl App {
                     // "Don't save": the work is discarded, so is its autosave
                     self.delete_autosave();
                     self.proj.dirty = false;
-                    self.proj.saved = clips_json(&self.project.clips);
+                    self.proj.saved =
+                        content_json(&self.project.clips, self.project.soundtrack.as_ref());
                 }
                 self.run_after(after);
             }
@@ -632,9 +642,10 @@ impl App {
                 let saved = r.autosave.saved_path.clone();
                 self.replace_project(r.autosave.project, saved.clone());
                 // still unsaved: compare against the project file as it is on disk
-                self.proj.saved = saved
-                    .and_then(|p| projfile::load(&p).ok())
-                    .map_or_else(|| clips_json(&[]), |p| clips_json(&p.clips));
+                self.proj.saved = saved.and_then(|p| projfile::load(&p).ok()).map_or_else(
+                    || content_json(&[], None),
+                    |p| content_json(&p.clips, p.soundtrack.as_ref()),
+                );
                 self.proj.dirty = true;
                 self.set_status("Restored the unsaved work");
             } else {

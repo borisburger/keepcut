@@ -38,6 +38,9 @@ impl App {
             _ => Vec::new(),
         };
 
+        // the soundtrack row sits at the bottom; the clips scroll above it
+        egui::Panel::bottom("soundtrack").show(ui, |ui| self.soundtrack_ui(ui));
+
         let clips = self.project.clips.clone();
         let mut select = None;
         let mut toggle = None;

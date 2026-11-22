@@ -10,7 +10,8 @@ use crate::encoders::{self, EncoderSet, Role, VideoEncode};
 use crate::error::{Error, Result};
 use crate::ffmpeg::{Cmd, Tools, ffmpeg_base};
 use crate::model::{
-    AudioTracks, ContentType, EncodingMode, OutputMode, Project, Quality, Segment, VideoCodec,
+    AudioTracks, ContentType, EncodingMode, OutputMode, Project, Quality, Segment, Soundtrack,
+    VideoCodec,
 };
 use crate::probe::{EPS, MediaInfo, VideoStream};
 use crate::timefmt::ff_secs;
@@ -52,6 +53,9 @@ pub struct OutputPlan {
     /// Rough peak temp space while producing this output (intermediates + FLAC).
     #[serde(default)]
     pub est_temp_bytes: u64,
+    /// Audio that replaces the clips' sound (joined output only).
+    #[serde(default)]
+    pub soundtrack: Option<Soundtrack>,
 }
 
 impl OutputPlan {
@@ -224,6 +228,12 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
         target_idx = i;
     }
     let joined = s.output_mode == OutputMode::Joined;
+    if project.soundtrack.is_some() && !joined {
+        warnings.push(
+            "the soundtrack is used only for a joined output; these files keep their own audio"
+                .into(),
+        );
+    }
     let target_sig = &signatures[target_idx].0;
     // A reference stream that has the target signature (source of profile/level/colors)
     let target_ref = active
@@ -470,6 +480,7 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
             video_codec,
             est_bytes: 0,
             est_temp_bytes: 0,
+            soundtrack: project.soundtrack.clone().filter(|_| joined),
         };
         (out.est_bytes, out.est_temp_bytes) = estimate(&out, infos, s.audio_bitrate_kbps);
         outputs.push(out);
@@ -1029,6 +1040,37 @@ pub fn audio_piece_cmd(tools: &Tools, sp: &SegmentPlan, dur: f64, out: &Path) ->
     .arg(out)
 }
 
+/// The soundtrack's audio for an output of `dur` seconds as one FLAC piece, in the same
+/// format as [`audio_piece_cmd`]: from `offset` in the file, cut at `dur`, padded with
+/// silence if the file ends earlier.
+pub fn soundtrack_piece_cmd(tools: &Tools, st: &Soundtrack, dur: f64, out: &Path) -> Cmd {
+    let mut c = ffmpeg_base(tools);
+    let d = ff_secs(dur);
+    if st.offset > 0.0 {
+        c = c.arg("-ss").arg(ff_secs(st.offset));
+    }
+    c = c.arg("-t").arg(ff_secs(dur + 1.0)).arg("-i").arg(&st.path);
+    let graph = format!(
+        "[0:a:0]aresample=48000:async=1:first_pts=0,aformat=sample_rates=48000:channel_layouts=stereo,apad=whole_dur={d},atrim=duration={d},asetnsamples=n=4608:p=0[a]"
+    );
+    c.arg("-filter_complex")
+        .arg(graph)
+        .args([
+            "-map",
+            "[a]",
+            "-vn",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-sample_fmt",
+            "s16",
+            "-c:a",
+            "flac",
+        ])
+        .arg(out)
+}
+
 /// A concat-demuxer list with exact `duration` directives.
 pub fn concat_list(items: &[(PathBuf, f64)]) -> String {
     let mut s = String::from("ffconcat version 1.0\n");
@@ -1223,6 +1265,7 @@ mod tests {
                 })
                 .collect(),
             export: Default::default(),
+            soundtrack: None,
         }
     }
 

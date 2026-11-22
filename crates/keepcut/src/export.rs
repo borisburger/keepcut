@@ -276,6 +276,8 @@ impl App {
                     Some(Ok(p)) => p.target_idx.and_then(|t| p.signatures.get(t)).map(|(s, _)| s.codec_name.clone()),
                     _ => None,
                 };
+                // a soundtrack replaces the audio of a joined output
+                let soundtrack = if self.soundtrack_active() { self.soundtrack_name() } else { None };
                 let x = &mut self.project.export;
                 match x.encoding {
                     EncodingMode::Smart => {
@@ -299,8 +301,13 @@ impl App {
 
                 ui.label("Audio");
                 ui.horizontal(|ui| {
-                    changed |= ui.radio_value(&mut x.audio_tracks, AudioTracks::MixAll, "Mix all tracks").changed();
-                    changed |= ui.radio_value(&mut x.audio_tracks, AudioTracks::FirstOnly, "First track only").changed();
+                    if let Some(name) = &soundtrack {
+                        ui.label(format!("Soundtrack ♪ {name}"))
+                            .on_hover_text("Replaces the clips' sound (set under the clip list)");
+                    } else {
+                        changed |= ui.radio_value(&mut x.audio_tracks, AudioTracks::MixAll, "Mix all tracks").changed();
+                        changed |= ui.radio_value(&mut x.audio_tracks, AudioTracks::FirstOnly, "First track only").changed();
+                    }
                     ui.add_space(12.0);
                     ui.label("AAC");
                     egui::ComboBox::from_id_salt("aac-rate")
@@ -318,9 +325,11 @@ impl App {
                      one gain per unit, up to ±20 dB, with a limiter at −1 dB. Silence is left alone.",
                 );
                 ui.horizontal(|ui| {
+                    // (a per-unit choice from before the soundtrack is exported as "whole")
                     let shown = match x.loudness {
                         Loudness::Off => "Off",
                         Loudness::Whole => "Whole video",
+                        Loudness::PerClip | Loudness::PerSegment if soundtrack.is_some() => "Whole video",
                         Loudness::PerClip => "Per clip",
                         Loudness::PerSegment => "Per segment",
                     };
@@ -330,14 +339,19 @@ impl App {
                             .selectable_value(&mut x.loudness, Loudness::Whole, "Whole video")
                             .on_hover_text("One gain for the whole file (each file in the per-clip/per-segment modes)")
                             .changed();
-                        changed |= ui
-                            .selectable_value(&mut x.loudness, Loudness::PerClip, "Per clip")
-                            .on_hover_text("One gain per source clip: evens out recordings made at different levels")
-                            .changed();
-                        changed |= ui
-                            .selectable_value(&mut x.loudness, Loudness::PerSegment, "Per segment")
-                            .on_hover_text("One gain per kept segment; segments shorter than 3 s use their clip's value")
-                            .changed();
+                        // with a soundtrack there is one piece of audio: only "whole" applies
+                        let per_unit = soundtrack.is_none();
+                        let off_tip = "Not with a soundtrack (it is one piece of audio)";
+                        for (mode, label, tip) in [
+                            (Loudness::PerClip, "Per clip", "One gain per source clip: evens out recordings made at different levels"),
+                            (Loudness::PerSegment, "Per segment", "One gain per kept segment; segments shorter than 3 s use their clip's value"),
+                        ] {
+                            let item = egui::Button::selectable(x.loudness == mode, label);
+                            if ui.add_enabled(per_unit, item).on_hover_text(tip).on_disabled_hover_text(off_tip).clicked() {
+                                x.loudness = mode;
+                                changed = true;
+                            }
+                        }
                     });
                     if x.loudness != Loudness::Off {
                         ui.label("target");

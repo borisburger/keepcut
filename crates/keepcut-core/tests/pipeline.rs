@@ -12,7 +12,7 @@ use keepcut_core::exec::{self, ExecOptions};
 use keepcut_core::ffmpeg::{self, CancelToken, LogSink, RunOpts, Tools};
 use keepcut_core::model::{
     Chapters, Clip, EncodingMode, ExportSettings, Loudness, OutputMode, Project, Quality,
-    Resolution, Segment, VideoCodec,
+    Resolution, Segment, Soundtrack, VideoCodec,
 };
 use keepcut_core::plan::{self, PieceKind};
 use keepcut_core::probe::{self, MediaInfo};
@@ -88,16 +88,25 @@ fn export_with(
     clips: Vec<Clip>,
     settings: ExportSettings,
 ) -> (plan::ExportPlan, Vec<PathBuf>) {
-    let infos: Vec<MediaInfo> = clips
+    export_project(
+        t,
+        Project {
+            version: 1,
+            id: uuid::Uuid::new_v4(),
+            clips,
+            export: settings,
+            soundtrack: None,
+        },
+    )
+}
+
+/// Plans and exports a whole project; asserts verification passed.
+fn export_project(t: &Tools, project: Project) -> (plan::ExportPlan, Vec<PathBuf>) {
+    let infos: Vec<MediaInfo> = project
+        .clips
         .iter()
         .map(|c| probe::probe(t, &c.path, None, None).unwrap())
         .collect();
-    let project = Project {
-        version: 1,
-        id: uuid::Uuid::new_v4(),
-        clips,
-        export: settings,
-    };
     let plan = plan::build(&project, &infos, &EncoderSet::software_only()).unwrap();
     let opts = ExecOptions {
         decode_check: DecodeCheck::Full,
@@ -455,6 +464,11 @@ fn no_audio_and_two_audio_tracks() {
 
 /// Integrated loudness of `[start, start + dur)` of a file.
 fn lufs(t: &Tools, file: &Path, start: f64, dur: f64) -> f64 {
+    band_lufs(t, file, start, dur, "anull")
+}
+
+/// Like [`lufs`], after the audio filter `filter` (e.g. a low-pass, to tell tones apart).
+fn band_lufs(t: &Tools, file: &Path, start: f64, dur: f64, filter: &str) -> f64 {
     let cmd = t
         .ffmpeg()
         .args(["-hide_banner", "-nostdin", "-ss"])
@@ -463,9 +477,114 @@ fn lufs(t: &Tools, file: &Path, start: f64, dur: f64) -> f64 {
         .arg(format!("{dur}"))
         .arg("-i")
         .arg(file)
-        .args(["-af", "ebur128=framelog=quiet", "-f", "null", "-"]);
+        .arg("-af")
+        .arg(format!("{filter},ebur128=framelog=quiet"))
+        .args(["-f", "null", "-"]);
     let o = ffmpeg::run_checked(&cmd, RunOpts::default()).unwrap();
     exec::parse_ebur128(&o.stderr).unwrap()
+}
+
+/// A joined export with a soundtrack: the clips' 440 Hz tone is replaced by the soundtrack
+/// from its start offset, cut at the end of the video, or followed by silence when it is
+/// shorter; loudness falls back to "whole output"; separate outputs keep their own audio.
+#[test]
+fn soundtrack_replaces_the_audio() {
+    let Some(t) = tools() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let src = make_clip(
+        &t,
+        dir.path(),
+        "a.mp4",
+        SRC_360,
+        &[
+            "-t",
+            "8",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-bf",
+            "0",
+            "-g",
+            "30",
+            "-c:a",
+            "aac",
+        ],
+    );
+    // 1 kHz for 5 s, then 2.5 kHz: with offset 5 only the 2.5 kHz part may be heard
+    let music = |name: &str, secs: u32| {
+        let source = format!(
+            "aevalsrc='if(lt(t,5),sin(2*PI*1000*t),sin(2*PI*2500*t))*0.3':s=44100:d={secs}"
+        );
+        make_clip(
+            &t,
+            dir.path(),
+            name,
+            &["-f", "lavfi", "-i", &source],
+            &["-c:a", "aac"],
+        )
+    };
+    let long = music("long.m4a", 30);
+    let short = music("short.m4a", 9);
+    let clips = || {
+        vec![
+            clip(&src, &[(0.0, 3.0), (4.0, 7.0)]),
+            clip(&src, &[(1.0, 6.0)]),
+        ]
+    };
+    let project = |st: &Path, loudness| Project {
+        version: 1,
+        id: uuid::Uuid::new_v4(),
+        clips: clips(),
+        export: ExportSettings {
+            output_dir: Some(dir.path().to_path_buf()),
+            output_name: Some(format!("{}.mp4", st.file_stem().unwrap().to_string_lossy())),
+            loudness,
+            loudness_target: -16.0,
+            ..Default::default()
+        },
+        soundtrack: Some(Soundtrack {
+            path: st.to_path_buf(),
+            offset: 5.0,
+        }),
+    };
+    let low = "lowpass=f=700,lowpass=f=700"; // the clips' 440 Hz
+    let mid = "bandpass=f=1000:w=300,bandpass=f=1000:w=300"; // the skipped part
+    let high = "highpass=f=2000,highpass=f=2000"; // the soundtrack after the offset
+
+    // longer soundtrack, per-clip loudness requested: cut at 11 s, normalized as a whole
+    let (plan, paths) = export_project(&t, project(&long, Loudness::PerClip));
+    assert!(plan.outputs[0].soundtrack.is_some());
+    let out = &paths[0];
+    let whole = lufs(&t, out, 0.0, 11.0);
+    assert!((whole + 16.0).abs() < 1.0, "loudness {whole}");
+    assert!(band_lufs(&t, out, 0.0, 11.0, high) > -25.0);
+    assert!(
+        band_lufs(&t, out, 0.0, 11.0, low) < -50.0,
+        "clip audio left"
+    );
+    assert!(band_lufs(&t, out, 0.0, 11.0, mid) < -40.0, "offset ignored");
+
+    // shorter soundtrack (4 s left after the offset): silence after it
+    let (_, paths) = export_project(&t, project(&short, Loudness::Off));
+    let out = &paths[0];
+    assert!(band_lufs(&t, out, 0.0, 3.8, high) > -25.0);
+    assert!(
+        lufs(&t, out, 4.3, 6.5) < -65.0,
+        "not silent after the soundtrack"
+    );
+
+    // separate outputs keep the clips' audio
+    let mut p = project(&long, Loudness::Off);
+    p.export.output_mode = OutputMode::PerClip;
+    let infos: Vec<MediaInfo> = p
+        .clips
+        .iter()
+        .map(|c| probe::probe(&t, &c.path, None, None).unwrap())
+        .collect();
+    let plan = plan::build(&p, &infos, &EncoderSet::software_only()).unwrap();
+    assert!(plan.outputs.iter().all(|o| o.soundtrack.is_none()));
+    assert!(plan.warnings.iter().any(|w| w.contains("soundtrack")));
 }
 
 #[test]

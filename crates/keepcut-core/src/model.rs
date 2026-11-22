@@ -17,6 +17,19 @@ pub struct Project {
     pub clips: Vec<Clip>,
     #[serde(default)]
     pub export: ExportSettings,
+    /// Audio that replaces the clips' own sound in the joined output (and in Preview all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soundtrack: Option<Soundtrack>,
+}
+
+/// An audio file played instead of the clips' sound from the start of the joined output.
+/// A longer file is cut at the end of the video; after a shorter one there is silence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Soundtrack {
+    pub path: PathBuf,
+    /// Where in the file to start (seconds).
+    #[serde(default)]
+    pub offset: f64,
 }
 
 fn default_version() -> u32 {

@@ -11,7 +11,7 @@
 //! set KEY VALUE (export options, see `set_export_option`) · wait-encoders · log-panel ·
 //! clip-title N TEXT · seg-title N TEXT (selected clip) · print-youtube ·
 //! save PATH · open PATH · new · relink N PATH · settings · show-save-prompt · close-dialogs ·
-//! add-dialog · window-size W H
+//! add-dialog · window-size W H · soundtrack PATH · soundtrack-offset T · soundtrack-off · mute
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -340,6 +340,22 @@ impl App {
                     self.export.show_finished_log();
                     true
                 }
+                "soundtrack" => {
+                    self.set_soundtrack(PathBuf::from(arg));
+                    true
+                }
+                "soundtrack-offset" => {
+                    self.set_soundtrack_offset(keepcut_core::timefmt::parse(arg).unwrap_or(0.0));
+                    true
+                }
+                "mute" => {
+                    self.player.command("set", &["mute", "yes"]);
+                    true
+                }
+                "soundtrack-off" => {
+                    self.remove_soundtrack();
+                    true
+                }
                 "window-size" => {
                     // inner size in points, e.g. `window-size 1100 750`
                     let mut it = arg
@@ -544,6 +560,14 @@ impl App {
             "can_undo": self.history.can_undo(),
             "can_redo": self.history.can_redo(),
             "plan": plan,
+            "soundtrack": self.project.soundtrack.as_ref().map(|st| serde_json::json!({
+                "file": st.path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "offset": st.offset,
+            })),
+            "loudness": format!("{:?}", self.project.export.loudness),
+            // the audio track mpv plays: an external file (the soundtrack) or the clips' own
+            "audio_file": self.player.mpv.get_property::<String>("current-tracks/audio/external-filename").ok(),
+            "audio_track": self.player.mpv.get_property::<i64>("current-tracks/audio/id").ok(),
         })
         .to_string()
     }

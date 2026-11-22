@@ -474,6 +474,7 @@ scale=W:H:force_original_aspect_ratio=decrease:flags=lanczos,pad=W:H:(ow-iw)/2:(
 4. **Final audio** is produced in the final mux (§6.7) from a concat list of the FLAC pieces, encoded once to AAC.
    - If loudness is on, a peak limiter runs over the whole stream: `alimiter=limit=<-1 dBTP as linear ≈ 0.891>:level=disabled`.
 - Disk: FLAC at 48 kHz stereo ≈ 100 KB/s, so 6 h ≈ 2 GB of temp. This is acceptable, and checked by the free-space check (§6.10).
+5. **Soundtrack** (`Project.soundtrack`: an audio file and an optional start offset): replaces the clips' sound in a **joined** output. Instead of the per-segment pieces, one FLAC piece of the output's whole duration is made from the file with the same filter chain (`-ss <offset> -t <D+1> -i <file>`, `[0:a:0]…apad=whole_dur=<D>,atrim=duration=<D>…`): a longer file is cut at the end of the video, a shorter one is followed by silence. The video is unaffected (still smart-cut/copied). Loudness: setting a soundtrack turns it off; "whole output" can be chosen (per clip/segment don't apply to one piece; an older per-unit choice is exported as whole). Separate outputs (per clip/segment) keep their own audio, with a plan warning. Set in a row under the clip list (§8.2), stored in the project file with a relative path like the clips; not part of the remembered export defaults. "Preview all" plays it instead of the clips' sound (`audio-add <url> select` once the EDL is loaded; the offset via `edl://<file>,start=<offset>`); the editor and cut preview keep the clips' sound.
 
 ### 6.7 Final mux (joined mode)
 ```

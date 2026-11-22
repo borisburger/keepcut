@@ -111,6 +111,10 @@ pub struct App {
     status_at: Instant,
     /// A file dialog couldn't be shown (no xdg-desktop-portal); explain it.
     pub portal_notice: bool,
+    /// The soundtrack's start field while it is being edited.
+    pub soundtrack_edit: Option<String>,
+    /// Soundtrack to attach once mpv has loaded "Preview all" (`audio-add … select`).
+    pending_soundtrack: Option<String>,
     /// Size the window to the screen once the monitor size is known (first run only).
     pub fit_window: bool,
     fit_window_tries: u32,
@@ -169,6 +173,7 @@ impl App {
             id: Uuid::new_v4(),
             clips: Vec::new(),
             export: Default::default(),
+            soundtrack: None,
         };
         config.apply_export_defaults(&mut project.export);
         let mut app = App {
@@ -199,6 +204,8 @@ impl App {
             status: String::new(),
             status_at: Instant::now(),
             portal_notice: false,
+            soundtrack_edit: None,
+            pending_soundtrack: None,
             fit_window: false,
             fit_window_tries: 0,
             fast_step: None,
@@ -272,7 +279,10 @@ impl App {
     }
 
     fn on_probed(&mut self, path: PathBuf, r: Result<Arc<MediaInfo>, String>) {
-        if let Ok(info) = &r {
+        let is_clip = self.project.clips.iter().any(|c| c.path == path);
+        if let Ok(info) = &r
+            && is_clip
+        {
             self.check_changed_source(&path, info);
             // thumbnail and waveform, once per file (a re-probe after a change asks again)
             self.thumbs.remove(&path);
@@ -658,9 +668,21 @@ impl App {
             return;
         }
         self.player.load(&player::edl_url(&items));
+        // "Preview all" plays the soundtrack instead of the clips' sound (it is added as an
+        // external track once the file is loaded; mpv plays one audio track at a time)
+        self.pending_soundtrack = if clip.is_none() {
+            self.soundtrack_url()
+        } else {
+            None
+        };
         self.player.command("set", &["pause", "no"]);
         self.player.state.time_pos = 0.0;
         self.loaded = Loaded::Preview { clip, spans };
+    }
+
+    /// Starts "Preview all" again from the beginning (e.g. after a soundtrack change).
+    pub fn restart_preview_all(&mut self) {
+        self.load_preview(None);
     }
 
     /// Leaves a preview, landing on the selected clip where the preview was.
@@ -824,6 +846,13 @@ impl App {
                     }
                 }
                 PlayerEvent::PlaybackRestart => self.seek_target = None,
+                PlayerEvent::FileLoaded => {
+                    if let Some(url) = self.pending_soundtrack.take()
+                        && matches!(self.loaded, Loaded::Preview { clip: None, .. })
+                    {
+                        self.player.command("audio-add", &[&url, "select"]);
+                    }
+                }
                 _ => {}
             }
         }

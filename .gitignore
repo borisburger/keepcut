@@ -4,5 +4,8 @@
 *.mp4
 *.ts
 *.flac
+*.m4a
+*.mp3
+*.wav
 /dist/
 /packaging/linux/.*.local.yml

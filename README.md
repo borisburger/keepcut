@@ -8,6 +8,7 @@ Keepcut is a desktop app for trimming and joining recordings (screen captures, c
 - Joined or separate outputs; clips with different formats are re-encoded to match
 - Chapters, plus a ready-to-paste YouTube chapter list
 - Loudness normalization (whole output, per clip, or per segment)
+- A soundtrack: replace the clips' sound with an audio file (optionally from a start time), in the joined output and in the preview
 - Projects with autosave and crash recovery; relinking of moved files
 - Every export is verified (duration, frame count, audio/video sync)
 
