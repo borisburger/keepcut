@@ -147,8 +147,7 @@ impl App {
             clips: Vec::new(),
             export: Default::default(),
         };
-        project.export.encoding = config.encoding;
-        project.export.output_mode = config.output_mode;
+        config.apply_export_defaults(&mut project.export);
         let mut app = App {
             renderer: Some(renderer),
             player,
@@ -779,6 +778,11 @@ impl App {
             .collect()
     }
 
+    /// The hardware encoder test (startup) has finished.
+    pub fn encoders_detected(&self) -> bool {
+        self.encoders_rx.is_none()
+    }
+
     pub fn mark_plan_dirty(&mut self) {
         self.plan_dirty = true;
     }
@@ -927,6 +931,13 @@ impl App {
                     .clicked()
                 {
                     self.open_export();
+                }
+                if ui
+                    .selectable_label(self.export.log_panel_open(), "Log")
+                    .on_hover_text("The ffmpeg commands of this session's exports")
+                    .clicked()
+                {
+                    self.export.toggle_log_panel();
                 }
             });
         });
@@ -1092,8 +1103,7 @@ impl eframe::App for App {
         self.renderer = None;
         // scripted test runs must not change the user's settings
         if self.script.is_none() {
-            self.config.encoding = self.project.export.encoding;
-            self.config.output_mode = self.project.export.output_mode;
+            self.config.remember_export(&self.project.export);
             self.config.save();
         }
     }
@@ -1140,6 +1150,7 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 self.video(ui, frame);
             });
+        self.log_panel(&ctx);
         self.export_window(&ctx);
         self.flush_seek();
 

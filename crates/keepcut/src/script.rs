@@ -7,7 +7,8 @@
 //! undo · redo · cut-preview · cancel-export ·
 //! preview-all · toggle-clip N · move-clip FROM TO · sleep SECS · screenshot PATH ·
 //! encoding smart|full · output-dir PATH · output-name NAME · open-export ·
-//! close-export · export · wait-export · print-state · quit
+//! close-export · export · wait-export · print-state · quit ·
+//! set KEY VALUE (export options, see `set_export_option`) · wait-encoders · log-panel
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -222,6 +223,24 @@ impl App {
                     self.mark_plan_dirty();
                     true
                 }
+                "set" => {
+                    // export settings, as the dialog would set them
+                    let (key, val) = arg.split_once(' ').unwrap_or((arg, ""));
+                    if let Err(e) = self.set_export_option(key, val.trim()) {
+                        out(format!("script: set {key}: {e}"));
+                    }
+                    self.mark_plan_dirty();
+                    true
+                }
+                "wait-encoders" => self.encoders_detected(),
+                "show-export-log" => {
+                    self.export.show_finished_log();
+                    true
+                }
+                "log-panel" => {
+                    self.export.toggle_log_panel();
+                    true
+                }
                 "open-export" => {
                     self.open_export();
                     true
@@ -264,6 +283,72 @@ impl App {
         self.script = Some(s);
     }
 
+    /// `set KEY VALUE`: mode joined|per-clip|per-segment · codec h264|hevc ·
+    /// encoder NAME|auto · smart-encoder NAME|auto · quality match|crf N|bitrate N ·
+    /// smart-quality … · res same|1080|WxH · fps keep|N · content auto|screen|camera ·
+    /// audio mix|first · aac KBPS · target auto|N (index in the plan's format list).
+    fn set_export_option(&mut self, key: &str, val: &str) -> anyhow::Result<()> {
+        use keepcut_core::model::{AudioTracks, ContentType, OutputMode, Quality, Resolution, VideoCodec};
+        let quality = |v: &str| -> anyhow::Result<Quality> {
+            let (k, n) = v.split_once(' ').unwrap_or((v, ""));
+            Ok(match k {
+                "match" => Quality::MatchSource,
+                "crf" => Quality::Crf(n.trim().parse()?),
+                "bitrate" => Quality::BitrateKbps(n.trim().parse()?),
+                _ => anyhow::bail!("quality: match | crf N | bitrate KBPS"),
+            })
+        };
+        let enc = |v: &str| (v != "auto").then(|| v.to_string());
+        let x = &mut self.project.export;
+        match key {
+            "mode" => {
+                x.output_mode = match val {
+                    "joined" => OutputMode::Joined,
+                    "per-clip" => OutputMode::PerClip,
+                    "per-segment" => OutputMode::PerSegment,
+                    _ => anyhow::bail!("joined | per-clip | per-segment"),
+                }
+            }
+            "codec" => x.full.codec = if val == "hevc" { VideoCodec::Hevc } else { VideoCodec::H264 },
+            "encoder" => x.full.encoder = enc(val),
+            "smart-encoder" => x.smart_encoder = enc(val),
+            "quality" => x.full.quality = quality(val)?,
+            "smart-quality" => x.smart_quality = quality(val)?,
+            "res" => {
+                x.full.resolution = match val.split_once('x') {
+                    _ if val == "same" => Resolution::Same,
+                    Some((w, h)) => Resolution::Custom(w.parse()?, h.parse()?),
+                    None => Resolution::ShortSide(val.trim_end_matches('p').parse()?),
+                }
+            }
+            "fps" => x.full.fps = if val == "keep" { None } else { Some(val.parse()?) },
+            "content" => {
+                x.full.content = match val {
+                    "screen" => ContentType::Screen,
+                    "camera" => ContentType::Camera,
+                    _ => ContentType::Auto,
+                }
+            }
+            "audio" => x.audio_tracks = if val == "first" { AudioTracks::FirstOnly } else { AudioTracks::MixAll },
+            "aac" => x.audio_bitrate_kbps = val.parse()?,
+            "target" => {
+                x.target_override = match (&self.plan, val) {
+                    (_, "auto") => None,
+                    (Some(Ok(p)), i) => Some(
+                        p.signatures
+                            .get(i.parse::<usize>()?)
+                            .ok_or_else(|| anyhow::anyhow!("no format {i}"))?
+                            .0
+                            .clone(),
+                    ),
+                    _ => anyhow::bail!("no plan yet"),
+                }
+            }
+            _ => anyhow::bail!("unknown option"),
+        }
+        Ok(())
+    }
+
     fn state_json(&self) -> String {
         let clips: Vec<serde_json::Value> = self
             .project
@@ -280,6 +365,8 @@ impl App {
         let plan = match &self.plan {
             Some(Ok(p)) => serde_json::json!({
                 "target": p.target_idx.map(|t| p.signatures[t].0.label()),
+                "formats": p.signatures.iter().map(|(s, _)| s.label()).collect::<Vec<_>>(),
+                "est_bytes": p.outputs.iter().map(|o| o.est_bytes).collect::<Vec<_>>(),
                 "clips": p.clips.iter().map(|v| v.summary.clone()).collect::<Vec<_>>(),
                 "outputs": p.outputs.iter().map(|o| o.path.display().to_string()).collect::<Vec<_>>(),
             }),

@@ -8,6 +8,7 @@ pub mod encoders;
 pub mod error;
 pub mod exec;
 pub mod ffmpeg;
+pub mod fsutil;
 pub mod history;
 pub mod model;
 pub mod plan;

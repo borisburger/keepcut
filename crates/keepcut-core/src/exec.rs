@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chapters::{self, Chapter};
 use crate::encoders;
+use crate::fsutil;
 use crate::error::{Error, Result};
 use crate::ffmpeg::{self, CancelToken, LogLine, LogSink, RunOpts, Tools};
 use crate::model::{Chapters, ExportSettings, Loudness};
@@ -36,6 +37,113 @@ pub struct OutputResult {
     pub verification: Verification,
     /// Per-piece timing, for calibration: (description, seconds).
     pub timings: Vec<(String, f64)>,
+    /// Things the user should know, e.g. an encoder fallback.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+const SPACE_MARGIN: u64 = 50_000_000;
+
+/// Re-tests every hardware encode of the plan with its real parameters and
+/// switches failing ones to the software encoder (§6.8). Returns notes.
+pub fn check_encoders(
+    tools: &Tools,
+    plan: &mut ExportPlan,
+    cancel: &CancelToken,
+    log: &LogSink,
+) -> Result<Vec<String>> {
+    let mut tested: Vec<(encoders::VideoEncode, Option<String>)> = Vec::new();
+    let mut notes = Vec::new();
+    for out in &mut plan.outputs {
+        for sp in &mut out.segments {
+            for p in &mut sp.pieces {
+                let PieceKind::Encode { enc, .. } = &mut p.kind else {
+                    continue;
+                };
+                if encoders::is_software(&enc.encoder) {
+                    continue;
+                }
+                let failure = match tested.iter().find(|(e, _)| e == enc.as_ref()) {
+                    Some((_, f)) => f.clone(),
+                    None => {
+                        cancel.check()?;
+                        let f = encoders::test_encode(tools, enc, Some(cancel), Some(log))?;
+                        if let Some(reason) = &f {
+                            let sw = enc.to_software();
+                            let note = format!(
+                                "{} can't encode {}×{} {} ({reason}); using {} instead",
+                                enc.encoder, enc.width, enc.height, enc.pix_fmt, sw.encoder
+                            );
+                            log(LogLine::Info(&note));
+                            notes.push(note);
+                        }
+                        tested.push(((**enc).clone(), f.clone()));
+                        f
+                    }
+                };
+                if failure.is_some() {
+                    **enc = enc.to_software();
+                }
+            }
+        }
+    }
+    Ok(notes)
+}
+
+/// Picks the temp parent folder and checks free space on the temp and output
+/// volumes (§6.10). Falls back to a hidden folder next to the first output when
+/// the OS temp volume is too small.
+fn prepare_space(plan: &ExportPlan, opts: &ExecOptions, log: &LogSink) -> Result<TempPlace> {
+    let need_temp = plan.outputs.iter().map(|o| o.est_temp_bytes).max().unwrap_or(0);
+    // estimates of re-encoded parts can be off by 2–4× (10-bit Quick Sync measured
+    // 4× over the guess): only refuse when even 1.5× the estimate does not fit
+    let need_temp = need_temp + need_temp / 2 + SPACE_MARGIN;
+    let os_temp = opts.temp_root.clone().unwrap_or_else(std::env::temp_dir);
+    // output space per folder
+    let mut per_dir: Vec<(PathBuf, u64)> = Vec::new();
+    for o in &plan.outputs {
+        let d = o.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        match per_dir.iter_mut().find(|(p, _)| *p == d) {
+            Some((_, n)) => *n += o.est_bytes,
+            None => per_dir.push((d, o.est_bytes)),
+        }
+    }
+    let temp_free = fsutil::free_space(&os_temp);
+    let place = if opts.temp_root.is_some() || temp_free.is_none_or(|f| f >= need_temp) {
+        TempPlace::Under(os_temp.join("keepcut"))
+    } else {
+        let dir = per_dir[0].0.clone();
+        log(LogLine::Info(&format!(
+            "not enough space in {} ({} free, about {} needed); temp files go to {}",
+            os_temp.display(),
+            fsutil::human_bytes(temp_free.unwrap_or(0)),
+            fsutil::human_bytes(need_temp),
+            dir.display()
+        )));
+        per_dir[0].1 += need_temp;
+        TempPlace::OutputFolder(dir)
+    };
+    for (dir, need) in &per_dir {
+        let need = need + need / 2 + SPACE_MARGIN;
+        if let Some(free) = fsutil::free_space(dir)
+            && free < need
+        {
+            return Err(Error::NoSpace(format!(
+                "Not enough disk space in {}: the export needs about {}, only {} is free",
+                dir.display(),
+                fsutil::human_bytes(need),
+                fsutil::human_bytes(free)
+            )));
+        }
+    }
+    Ok(place)
+}
+
+enum TempPlace {
+    /// `<dir>/export-XXXX` (dir = `<OS temp>/keepcut`).
+    Under(PathBuf),
+    /// `<output folder>/.keepcut-tmp-XXXX`.
+    OutputFolder(PathBuf),
 }
 
 /// Deletes `keepcut/*` temp dirs older than one day (call at startup).
@@ -108,15 +216,27 @@ pub fn execute(
             "loudness normalization is not implemented yet; exporting without it",
         ));
     }
-    let root = opts
-        .temp_root
-        .clone()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("keepcut");
-    std::fs::create_dir_all(&root)?;
-    let tmp = tempfile::Builder::new()
-        .prefix("export-")
-        .tempdir_in(&root)?;
+    progress(Progress {
+        fraction: 0.0,
+        step: "Checking encoders and disk space".into(),
+    });
+    let mut plan = plan.clone();
+    let notes = check_encoders(tools, &mut plan, cancel, log)?;
+    let plan = &plan;
+    let tmp = match prepare_space(plan, opts, log)? {
+        TempPlace::Under(root) => {
+            std::fs::create_dir_all(&root)?;
+            tempfile::Builder::new()
+                .prefix("export-")
+                .tempdir_in(&root)?
+        }
+        TempPlace::OutputFolder(dir) => {
+            std::fs::create_dir_all(&dir)?;
+            tempfile::Builder::new()
+                .prefix(".keepcut-tmp-")
+                .tempdir_in(&dir)?
+        }
+    };
 
     let total: f64 = plan
         .outputs
@@ -162,7 +282,15 @@ pub fn execute(
             Ok(mut res) => {
                 std::fs::rename(&partial, &out.path)?;
                 res.path = out.path.clone();
+                // export-wide notes (encoder fallbacks) go with the first output
+                if oi == 0 {
+                    res.notes.splice(0..0, notes.iter().cloned());
+                }
                 results.push(res);
+                // free this output's intermediates before the next one (peak temp)
+                if !opts.keep_temp {
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&partial);
@@ -210,6 +338,7 @@ fn run_output(
     tr: &mut Tracker<'_>,
 ) -> Result<OutputResult> {
     let mut timings = Vec::new();
+    let mut notes = Vec::new();
     let mut video_items = Vec::new();
     let nseg = out.segments.len();
 
@@ -262,21 +391,22 @@ fn run_output(
                 } else {
                     0.0
                 };
-                let cmd = plan::piece_cmd(tools, sp, piece, file, fmt, shift);
-                let what = match &piece.kind {
+                let mut piece = piece.clone();
+                let what = |piece: &plan::Piece| match &piece.kind {
                     PieceKind::Copy { .. } => "copying".to_string(),
                     PieceKind::Encode { enc, role, .. } => {
                         format!("encoding {:?} ({})", role, enc.encoder).to_lowercase()
                     }
                 };
-                let step = format!("Segment {}/{nseg}: {what}", si + 1);
                 let w = piece_weight(&piece.kind);
                 let len = (piece.end - piece.start).max(1e-6);
-                tr.report(&step, 0.0);
                 let t0 = Instant::now();
-                {
+                loop {
+                    let step = format!("Segment {}/{nseg}: {}", si + 1, what(&piece));
+                    tr.report(&step, 0.0);
+                    let cmd = plan::piece_cmd(tools, sp, &piece, file, fmt, shift);
                     let mut cb = |t: f64| tr.report(&step, (t / len).clamp(0.0, 1.0) * len * w);
-                    ffmpeg::run_checked(
+                    let r = ffmpeg::run_checked(
                         &cmd,
                         RunOpts {
                             cancel: Some(cancel),
@@ -284,20 +414,42 @@ fn run_output(
                             on_progress: Some(&mut cb),
                             ..Default::default()
                         },
-                    )?;
+                    );
+                    match (r, &mut piece.kind) {
+                        (Ok(_), _) => break,
+                        // a hardware encoder can still fail on real content (driver,
+                        // session limits): retry this piece once in software
+                        (Err(Error::CommandFailed { .. }), PieceKind::Encode { enc, .. })
+                            if !encoders::is_software(&enc.encoder) =>
+                        {
+                            let sw = enc.to_software();
+                            let note = format!(
+                                "{} failed on {} [{:.3}, {:.3}); re-encoded that part with {}",
+                                enc.encoder,
+                                sp.src.file_name().unwrap_or_default().to_string_lossy(),
+                                piece.start,
+                                piece.end,
+                                sw.encoder
+                            );
+                            log(LogLine::Info(&note));
+                            notes.push(note);
+                            **enc = sw;
+                        }
+                        (Err(e), _) => return Err(e),
+                    }
                 }
                 timings.push((
                     format!(
                         "{} {} [{:.3}, {:.3})",
                         sp.src.file_name().unwrap_or_default().to_string_lossy(),
-                        what,
+                        what(&piece),
                         piece.start,
                         piece.end
                     ),
                     t0.elapsed().as_secs_f64(),
                 ));
                 tr.done += len * w;
-                check_piece(tools, file, piece, log)?;
+                check_piece(tools, file, &piece, log)?;
             }
         }
         if pass_copy {
@@ -417,6 +569,7 @@ fn run_output(
         path: partial.to_path_buf(),
         verification,
         timings,
+        notes,
     })
 }
 
@@ -582,4 +735,41 @@ fn measure_delay(tools: &Tools, file: &Path, log: &LogSink) -> Result<f64> {
         Some(d) if min_pts.is_finite() => (min_pts - d).max(0.0),
         _ => 0.0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::EncodingMode;
+
+    fn plan_with(out: &Path, est: u64) -> ExportPlan {
+        ExportPlan {
+            encoding: EncodingMode::Smart,
+            signatures: Vec::new(),
+            target_idx: None,
+            clips: Vec::new(),
+            outputs: vec![OutputPlan {
+                path: out.join("x.mp4"),
+                segments: Vec::new(),
+                timescale: None,
+                creation_time: None,
+                video_codec: "h264".into(),
+                est_bytes: est,
+                est_temp_bytes: 1000,
+            }],
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn refuses_when_the_output_does_not_fit() {
+        let dir = std::env::temp_dir();
+        let log: LogSink = std::sync::Arc::new(|_| {});
+        let opts = ExecOptions::default();
+        assert!(prepare_space(&plan_with(&dir, 1_000_000), &opts, &log).is_ok());
+        match prepare_space(&plan_with(&dir, u64::MAX / 4), &opts, &log) {
+            Err(Error::NoSpace(m)) => assert!(m.contains("Not enough disk space")),
+            other => panic!("expected NoSpace, got {:?}", other.map(|_| ())),
+        }
+    }
 }

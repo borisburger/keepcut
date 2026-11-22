@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use keepcut_core::model::{EncodingMode, OutputMode};
+use keepcut_core::model::{
+    AudioTracks, EncodingMode, ExportSettings, FullEncodeSettings, OutputMode, Quality,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -31,6 +33,13 @@ pub struct Config {
     pub custom_output_dir: Option<PathBuf>,
     pub encoding: EncodingMode,
     pub output_mode: OutputMode,
+    /// Encoder for whole re-encodes in Smart mode (`None` = Auto).
+    pub smart_encoder: Option<String>,
+    pub smart_quality: Quality,
+    /// The last Full re-encode settings.
+    pub full: FullEncodeSettings,
+    pub audio_tracks: AudioTracks,
+    pub audio_bitrate_kbps: u32,
     pub render: RenderPath,
 }
 
@@ -41,6 +50,11 @@ impl Default for Config {
             custom_output_dir: None,
             encoding: EncodingMode::Smart,
             output_mode: OutputMode::Joined,
+            smart_encoder: None,
+            smart_quality: Quality::MatchSource,
+            full: FullEncodeSettings::default(),
+            audio_tracks: AudioTracks::MixAll,
+            audio_bitrate_kbps: 192,
             render: RenderPath::Auto,
         }
     }
@@ -80,5 +94,29 @@ impl Config {
         if let Err(e) = result {
             tracing::warn!("cannot save config: {e}");
         }
+    }
+}
+
+impl Config {
+    /// The remembered export choices → a project's export settings.
+    pub fn apply_export_defaults(&self, x: &mut ExportSettings) {
+        x.encoding = self.encoding;
+        x.output_mode = self.output_mode;
+        x.smart_encoder = self.smart_encoder.clone();
+        x.smart_quality = self.smart_quality.clone();
+        x.full = self.full.clone();
+        x.audio_tracks = self.audio_tracks;
+        x.audio_bitrate_kbps = self.audio_bitrate_kbps;
+    }
+
+    /// Remembers the export choices of `x` (saved with the config).
+    pub fn remember_export(&mut self, x: &ExportSettings) {
+        self.encoding = x.encoding;
+        self.output_mode = x.output_mode;
+        self.smart_encoder = x.smart_encoder.clone();
+        self.smart_quality = x.smart_quality.clone();
+        self.full = x.full.clone();
+        self.audio_tracks = x.audio_tracks;
+        self.audio_bitrate_kbps = x.audio_bitrate_kbps;
     }
 }

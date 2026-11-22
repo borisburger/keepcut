@@ -75,6 +75,51 @@ pub fn is_software(enc: &str) -> bool {
     enc.starts_with("lib")
 }
 
+/// Output codec of an ffmpeg encoder name (`hevc_nvenc` → HEVC).
+pub fn codec_of_encoder(enc: &str) -> Option<VideoCodec> {
+    match enc {
+        "libx264" => Some(VideoCodec::H264),
+        "libx265" => Some(VideoCodec::Hevc),
+        "libaom-av1" => Some(VideoCodec::Av1),
+        e if e.starts_with("h264_") => Some(VideoCodec::H264),
+        e if e.starts_with("hevc_") => Some(VideoCodec::Hevc),
+        e if e.starts_with("av1_") => Some(VideoCodec::Av1),
+        _ => None,
+    }
+}
+
+/// The same encoder family for another codec: `h264_nvenc` → `hevc_nvenc`,
+/// `libx264` → `libx265`. `None` if the family has no encoder for `codec`.
+pub fn counterpart(enc: &str, codec: VideoCodec) -> Option<String> {
+    if codec_of_encoder(enc) == Some(codec) {
+        return Some(enc.to_string());
+    }
+    if is_software(enc) {
+        return Some(software_encoder(codec).to_string());
+    }
+    let (_, family) = enc.split_once('_')?;
+    let cand = format!("{}{family}", codec_prefix(codec));
+    CANDIDATES.contains(&cand.as_str()).then_some(cand)
+}
+
+/// Human name of an encoder for menus: "NVIDIA NVENC (h264_nvenc)".
+pub fn describe(enc: &str) -> String {
+    let vendor = match enc {
+        "libx264" | "libx265" | "libaom-av1" => "software",
+        e if e.ends_with("_nvenc") => "NVIDIA NVENC",
+        e if e.ends_with("_amf") => "AMD AMF",
+        e if e.ends_with("_qsv") => "Intel Quick Sync",
+        e if e.ends_with("_vaapi") => "VA-API",
+        e if e.ends_with("_videotoolbox") => "VideoToolbox",
+        _ => "",
+    };
+    if vendor.is_empty() {
+        enc.to_string()
+    } else {
+        format!("{vendor} ({enc})")
+    }
+}
+
 pub fn codec_of_name(codec_name: &str) -> Option<VideoCodec> {
     match codec_name {
         "h264" => Some(VideoCodec::H264),
@@ -119,37 +164,57 @@ pub fn detect(
         if out.success() {
             set.working.push(enc.to_string());
         } else {
-            let reason = out
-                .stderr
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("failed")
-                .to_string();
-            set.failed.push((enc.to_string(), reason));
+            set.failed.push((enc.to_string(), failure_reason(&out.stderr)));
         }
     }
     Ok(set)
 }
 
-/// Re-tests one encoder with the real target parameters (some hardware
-/// encoders reject 4K, 10-bit or certain profiles).
-pub fn test_with(
+/// Re-tests an encode with its real parameters (some hardware encoders reject
+/// 4K, 10-bit or certain profiles; §6.8): a 1-frame encode of a black frame of
+/// the output size with exactly the arguments the pieces will use.
+/// Returns `None` when it works, else the reason.
+pub fn test_encode(
     tools: &Tools,
-    enc: &str,
-    w: u32,
-    h: u32,
-    pix_fmt: &str,
+    enc: &VideoEncode,
+    cancel: Option<&CancelToken>,
     log: Option<&LogSink>,
-) -> Result<bool> {
-    Ok(ffmpeg::run(
-        &test_cmd(tools, enc, w, h, pix_fmt),
+) -> Result<Option<String>> {
+    let (w, h) = (enc.width.max(64), enc.height.max(64));
+    let mut c = tools
+        .ffmpeg()
+        .args(["-hide_banner", "-nostdin", "-v", "error"]);
+    let vaapi = enc.encoder.ends_with("_vaapi");
+    if vaapi {
+        c = c.args(["-vaapi_device", "/dev/dri/renderD128"]);
+    }
+    c = c
+        .args(["-f", "lavfi", "-i"])
+        .arg(format!("color=black:s={w}x{h}:r=15:d=0.2"));
+    if vaapi {
+        c = c.args(["-vf", "format=nv12,hwupload"]);
+    }
+    let out = ffmpeg::run(
+        &c.args(enc.args()).args(["-frames:v", "1", "-f", "null", "-"]),
         RunOpts {
+            cancel,
             log,
             ..Default::default()
         },
-    )?
-    .success())
+    )?;
+    Ok((!out.success()).then(|| failure_reason(&out.stderr)))
+}
+
+/// The useful part of a failed test encode: ffmpeg's *first* message is the
+/// cause ("DLL amfrt64.dll failed to open"); the last one is a generic
+/// "Nothing was written…". The `[name @ 0x…] ` prefixes are removed.
+pub fn failure_reason(stderr: &str) -> String {
+    let line = stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed");
+    let mut rest = line;
+    while let Some(r) = rest.strip_prefix('[').and_then(|r| r.split_once("] ")).map(|(_, r)| r) {
+        rest = r.trim_start();
+    }
+    rest.to_string()
 }
 
 /// What a re-encoded piece is used for; selects the preset.
@@ -180,7 +245,9 @@ pub struct VideoEncode {
     /// Keyframe interval in frames.
     pub gop: Option<u32>,
     pub tune: Option<String>,
-    /// Output height (selects faster presets at ≥ 2160p).
+    /// Output frame size (the height selects faster presets at ≥ 2160p).
+    #[serde(default)]
+    pub width: u32,
     pub height: u32,
 }
 
@@ -210,6 +277,31 @@ pub fn ffmpeg_level(codec: VideoCodec, level: i64) -> Option<String> {
 }
 
 impl VideoEncode {
+    /// "H.264", "HEVC 10-bit", …
+    pub fn codec_label(&self) -> String {
+        let c = match codec_of_encoder(&self.encoder) {
+            Some(VideoCodec::H264) => "H.264",
+            Some(VideoCodec::Hevc) => "HEVC",
+            Some(VideoCodec::Av1) => "AV1",
+            None => "video",
+        };
+        if self.pix_fmt.contains("10") {
+            format!("{c} 10-bit")
+        } else {
+            c.to_string()
+        }
+    }
+
+    /// The same encode with the codec's software encoder (fallback when a
+    /// hardware encoder fails; §6.8).
+    pub fn to_software(&self) -> VideoEncode {
+        let codec = codec_of_encoder(&self.encoder).unwrap_or(VideoCodec::H264);
+        VideoEncode {
+            encoder: software_encoder(codec).to_string(),
+            ..self.clone()
+        }
+    }
+
     /// Encoder arguments (`-c:v … -pix_fmt … …`), without input/filter/output.
     pub fn args(&self) -> Vec<String> {
         let e = self.encoder.as_str();
@@ -394,6 +486,19 @@ mod tests {
     }
 
     #[test]
+    fn counterparts() {
+        assert_eq!(counterpart("hevc_nvenc", VideoCodec::H264).as_deref(), Some("h264_nvenc"));
+        assert_eq!(counterpart("h264_qsv", VideoCodec::Hevc).as_deref(), Some("hevc_qsv"));
+        assert_eq!(counterpart("libx265", VideoCodec::H264).as_deref(), Some("libx264"));
+        assert_eq!(counterpart("h264_nvenc", VideoCodec::H264).as_deref(), Some("h264_nvenc"));
+        assert_eq!(counterpart("h264_videotoolbox", VideoCodec::Av1), None);
+        assert_eq!(
+            failure_reason("[AMF @ 0000] DLL amfrt64.dll failed to open\n[h264_amf @ 01] x\n"),
+            "DLL amfrt64.dll failed to open"
+        );
+    }
+
+    #[test]
     fn x264_head_args() {
         let v = VideoEncode {
             encoder: "libx264".into(),
@@ -409,6 +514,7 @@ mod tests {
             bframes: 0,
             gop: None,
             tune: None,
+            width: 1920,
             height: 1080,
         };
         assert_eq!(

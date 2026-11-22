@@ -10,7 +10,9 @@ use std::sync::Arc;
 use keepcut_core::encoders::EncoderSet;
 use keepcut_core::exec::{self, ExecOptions};
 use keepcut_core::ffmpeg::{self, CancelToken, LogSink, RunOpts, Tools};
-use keepcut_core::model::{Clip, EncodingMode, ExportSettings, Project, Segment};
+use keepcut_core::model::{
+    Clip, EncodingMode, ExportSettings, OutputMode, Project, Quality, Resolution, Segment, VideoCodec,
+};
 use keepcut_core::plan::{self, PieceKind};
 use keepcut_core::probe::{self, MediaInfo};
 use keepcut_core::verify::DecodeCheck;
@@ -67,6 +69,24 @@ fn clip(path: &Path, segs: &[(f64, f64)]) -> Clip {
 
 /// Plans and exports; asserts verification passed. Returns the plan.
 fn export(t: &Tools, out_dir: &Path, clips: Vec<Clip>, encoding: EncodingMode) -> plan::ExportPlan {
+    export_with(
+        t,
+        clips,
+        ExportSettings {
+            encoding,
+            output_dir: Some(out_dir.to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .0
+}
+
+/// Like [`export`] with explicit settings; also returns the output paths.
+fn export_with(
+    t: &Tools,
+    clips: Vec<Clip>,
+    settings: ExportSettings,
+) -> (plan::ExportPlan, Vec<PathBuf>) {
     let infos: Vec<MediaInfo> = clips
         .iter()
         .map(|c| probe::probe(t, &c.path, None, None).unwrap())
@@ -75,11 +95,7 @@ fn export(t: &Tools, out_dir: &Path, clips: Vec<Clip>, encoding: EncodingMode) -
         version: 1,
         id: uuid::Uuid::new_v4(),
         clips,
-        export: ExportSettings {
-            encoding,
-            output_dir: Some(out_dir.to_path_buf()),
-            ..Default::default()
-        },
+        export: settings,
     };
     let plan = plan::build(&project, &infos, &EncoderSet::software_only()).unwrap();
     let opts = ExecOptions {
@@ -112,7 +128,83 @@ fn export(t: &Tools, out_dir: &Path, clips: Vec<Clip>, encoding: EncodingMode) -
             v.max_timestamp_error
         );
     }
-    plan
+    let paths = results.into_iter().map(|r| r.path).collect();
+    (plan, paths)
+}
+
+#[test]
+fn full_hevc_10bit_downscale_constant_fps() {
+    let Some(t) = tools() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let hevc10 = make_clip(
+        &t,
+        dir.path(),
+        "hevc10.mp4",
+        SRC_360,
+        &[
+            "-t", "6", "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+            "-x265-params", "log-level=error", "-c:a", "aac",
+        ],
+    );
+    let small43 = make_clip(
+        &t,
+        dir.path(),
+        "small43.mp4",
+        &["-f", "lavfi", "-i", "testsrc2=s=320x240:r=15"],
+        &["-t", "4", "-c:v", "libx264", "-preset", "ultrafast"],
+    );
+    let mut s = ExportSettings {
+        encoding: EncodingMode::Full,
+        output_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    s.full.codec = VideoCodec::Hevc;
+    s.full.resolution = Resolution::ShortSide(240);
+    s.full.fps = Some(25);
+    s.full.quality = Quality::Crf(30);
+    let (plan, paths) = export_with(
+        &t,
+        vec![clip(&hevc10, &[(0.5, 5.5)]), clip(&small43, &[(1.0, 3.0)])],
+        s,
+    );
+    assert_eq!(plan.outputs.len(), 1);
+    let m = probe::probe(&t, &paths[0], None, None).unwrap();
+    let v = m.video.unwrap();
+    // target = the 10-bit HEVC clip (longer kept part): 640×360 → 426×240, 10-bit kept
+    assert_eq!((v.codec_name.as_str(), v.width, v.height), ("hevc", 426, 240));
+    assert_eq!(v.pix_fmt, "yuv420p10le");
+    assert_eq!(m.frames.len(), 7 * 25, "constant 25 fps over 7 s");
+}
+
+#[test]
+fn per_clip_and_per_segment_outputs() {
+    let Some(t) = tools() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let enc = ["-t", "8", "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-g", "30", "-c:a", "aac"];
+    let a = make_clip(&t, dir.path(), "a.mp4", SRC_360, &enc);
+    let b = make_clip(&t, dir.path(), "b.mp4", SRC_360, &enc);
+    let clips = || vec![clip(&a, &[(0.7, 2.1), (3.0, 5.0)]), clip(&b, &[(2.5, 7.9)])];
+    let settings = |mode| ExportSettings {
+        output_mode: mode,
+        output_dir: Some(dir.path().join("out")),
+        ..Default::default()
+    };
+    std::fs::create_dir_all(dir.path().join("out")).unwrap();
+    let (_, paths) = export_with(&t, clips(), settings(OutputMode::PerClip));
+    let names: Vec<String> = paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["a - cut.mp4", "b - cut.mp4"]);
+    let (_, paths) = export_with(&t, clips(), settings(OutputMode::PerSegment));
+    let names: Vec<String> = paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["a - part 01.mp4", "a - part 02.mp4", "b - part 01.mp4"]);
+    // exporting again never overwrites
+    let (_, again) = export_with(&t, clips(), settings(OutputMode::PerClip));
+    assert!(again[0].ends_with("a - cut (2).mp4"));
 }
 
 fn has_copy(plan: &plan::ExportPlan) -> bool {

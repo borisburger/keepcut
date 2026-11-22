@@ -8,7 +8,13 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText};
 use keepcut_core::exec::{self, ExecOptions, OutputResult};
 use keepcut_core::ffmpeg::{CancelToken, LogLine, LogSink};
-use keepcut_core::model::{EncodingMode, OutputMode};
+use keepcut_core::compat::Signature;
+use keepcut_core::encoders::{self, EncoderSet};
+use keepcut_core::fsutil;
+use keepcut_core::model::{
+    AudioTracks, ContentType, EncodingMode, FullEncodeSettings, OutputMode, Quality, Resolution,
+    VideoCodec,
+};
 use keepcut_core::plan;
 use keepcut_core::probe::MediaInfo;
 use keepcut_core::timefmt;
@@ -26,6 +32,9 @@ pub struct ExportUi {
     name_edited: bool,
     job: Option<Job>,
     finished: Option<Finished>,
+    /// Every export command and message of this session (the command log panel).
+    session_log: Arc<Mutex<Vec<String>>>,
+    log_panel: bool,
 }
 
 struct Job {
@@ -47,6 +56,18 @@ struct Finished {
 impl ExportUi {
     pub fn is_running(&self) -> bool {
         self.job.is_some()
+    }
+    pub fn log_panel_open(&self) -> bool {
+        self.log_panel
+    }
+    /// Shows the log in the finish window (script command `show-export-log`).
+    pub fn show_finished_log(&mut self) {
+        if let Some(f) = &mut self.finished {
+            f.show_log = true;
+        }
+    }
+    pub fn toggle_log_panel(&mut self) {
+        self.log_panel = !self.log_panel;
     }
     pub fn is_modal_open(&self) -> bool {
         self.dialog || self.job.is_some() || self.finished.is_some()
@@ -110,6 +131,43 @@ impl App {
         }
     }
 
+    /// The command log panel (§6.10): every ffmpeg command of this session,
+    /// shell-quoted and copyable.
+    pub fn log_panel(&mut self, ctx: &egui::Context) {
+        if !self.export.log_panel {
+            return;
+        }
+        let mut open = true;
+        let session = self.export.session_log.clone();
+        let screen = ctx.content_rect();
+        egui::Window::new("Command log")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([screen.width() * 0.6, screen.height() * 0.6])
+            .min_size([320.0, 160.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Copy all").clicked() {
+                        ui.ctx().copy_text(session.lock().unwrap().join("\n"));
+                    }
+                    if ui.button("Clear").clicked() {
+                        session.lock().unwrap().clear();
+                    }
+                    ui.weak("Commands of this session's exports; the full ffmpeg output is in each export's log");
+                });
+                let lines = session.lock().unwrap();
+                if lines.is_empty() {
+                    ui.weak("No exports yet.");
+                }
+                // fill the window, whatever size the user drags it to
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| log_lines(ui, &lines));
+            });
+        self.export.log_panel = open;
+    }
+
     pub fn export_window(&mut self, ctx: &egui::Context) {
         if self.export.dialog {
             self.export_dialog(ctx);
@@ -170,6 +228,31 @@ impl App {
                     ui.end_row();
                 }
 
+                // target format (joined mode with clips of different formats)
+                // signatures sorted by kept duration: the first is the automatic choice
+                let sigs: Vec<Signature> = match &self.plan {
+                    Some(Ok(p)) => p.signatures.iter().map(|(s, _)| s.clone()).collect(),
+                    _ => Vec::new(),
+                };
+                if self.project.export.output_mode == OutputMode::Joined && sigs.len() > 1 {
+                    ui.label("Target format");
+                    let x = &mut self.project.export;
+                    let auto = format!("Automatic: {}", sigs[0].label());
+                    let shown = match &x.target_override {
+                        Some(s) if sigs.contains(s) => s.label(),
+                        _ => auto.clone(),
+                    };
+                    egui::ComboBox::from_id_salt("target-format").selected_text(shown).width(400.0).show_ui(ui, |ui| {
+                        changed |= ui.selectable_value(&mut x.target_override, None, auto).changed();
+                        for s in &sigs {
+                            changed |= ui.selectable_value(&mut x.target_override, Some(s.clone()), s.label()).changed();
+                        }
+                    })
+                    .response
+                    .on_hover_text("Clips in this format are copied; the others are re-encoded to match it");
+                    ui.end_row();
+                }
+
                 ui.label("Encoding");
                 ui.vertical(|ui| {
                     let e = &mut self.project.export.encoding;
@@ -178,9 +261,50 @@ impl App {
                         .on_hover_text("Copies the original video; re-encodes only from a cut to the next keyframe, and clips that don't match")
                         .changed();
                     changed |= ui
-                        .radio_value(e, EncodingMode::Full, "Full re-encode (H.264, match source quality)")
-                        .on_hover_text("Re-encodes everything with one set of settings; the safe fallback")
+                        .radio_value(e, EncodingMode::Full, "Full re-encode")
+                        .on_hover_text("Re-encodes everything with one set of settings: a smaller file, another codec, size or frame rate, or the safe fallback")
                         .changed();
+                });
+                ui.end_row();
+
+                let target_codec = match &self.plan {
+                    Some(Ok(p)) => p.target_idx.and_then(|t| p.signatures.get(t)).map(|(s, _)| s.codec_name.clone()),
+                    _ => None,
+                };
+                let x = &mut self.project.export;
+                match x.encoding {
+                    EncodingMode::Smart => {
+                        let codec = target_codec.as_deref().and_then(encoders::codec_of_name).unwrap_or(VideoCodec::H264);
+                        ui.label("Re-encoded clips").on_hover_text(
+                            "Clips that don't match the target format are re-encoded whole. \
+                             The short parts from a cut to the next keyframe always use the software encoder.",
+                        );
+                        ui.vertical(|ui| {
+                            changed |= encoder_combo(ui, "smart-enc", &mut x.smart_encoder, codec, &self.encoders);
+                            changed |= quality_ui(ui, "smart-q", &mut x.smart_quality);
+                        });
+                        ui.end_row();
+                    }
+                    EncodingMode::Full => {
+                        ui.label("Video");
+                        ui.vertical(|ui| full_options(ui, &mut x.full, &self.encoders, &mut changed));
+                        ui.end_row();
+                    }
+                }
+
+                ui.label("Audio");
+                ui.horizontal(|ui| {
+                    changed |= ui.radio_value(&mut x.audio_tracks, AudioTracks::MixAll, "Mix all tracks").changed();
+                    changed |= ui.radio_value(&mut x.audio_tracks, AudioTracks::FirstOnly, "First track only").changed();
+                    ui.add_space(12.0);
+                    ui.label("AAC");
+                    egui::ComboBox::from_id_salt("aac-rate")
+                        .selected_text(format!("{} kbps", x.audio_bitrate_kbps))
+                        .show_ui(ui, |ui| {
+                            for r in [128, 160, 192, 256, 320] {
+                                changed |= ui.selectable_value(&mut x.audio_bitrate_kbps, r, format!("{r} kbps")).changed();
+                            }
+                        });
                 });
                 ui.end_row();
             });
@@ -205,7 +329,7 @@ impl App {
                                 .unwrap_or_default();
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(RichText::new(name).strong());
-                                if v.reasons.is_empty() || v.copyable {
+                                if v.reasons.is_empty() || v.copyable || p.encoding == EncodingMode::Full {
                                     ui.label(&v.summary);
                                 } else {
                                     ui.colored_label(ui.visuals().warn_fg_color, &v.summary);
@@ -220,9 +344,38 @@ impl App {
                         }
                         ui.add_space(4.0);
                         for o in &p.outputs {
-                            ui.label(format!("Output: {}  ({})", o.path.display(), timefmt::display(o.duration())));
+                            ui.label(format!(
+                                "Output: {}  ({}, about {})",
+                                o.path.display(),
+                                timefmt::display(o.duration()),
+                                fsutil::human_bytes(o.est_bytes)
+                            ));
                         }
                     });
+                    // disk space (§6.10): the export checks this again before it starts
+                    let temp = p.outputs.iter().map(|o| o.est_temp_bytes).max().unwrap_or(0);
+                    let total: u64 = p.outputs.iter().map(|o| o.est_bytes).sum();
+                    let temp_dir = std::env::temp_dir();
+                    let temp_free = fsutil::free_space(&temp_dir);
+                    let out_dir = p.outputs.first().and_then(|o| o.path.parent()).map(Path::to_path_buf);
+                    let out_free = out_dir.as_deref().and_then(fsutil::free_space);
+                    let free = |f: Option<u64>| f.map_or("unknown".into(), fsutil::human_bytes);
+                    ui.weak(format!(
+                        "Needs about {} of temporary space ({} free) and {} for the output ({} free)",
+                        fsutil::human_bytes(temp),
+                        free(temp_free),
+                        fsutil::human_bytes(total),
+                        free(out_free)
+                    ))
+                    .on_hover_text("Estimates. Copied parts cost what they cost in the source; re-encoded parts are guessed from the source bitrate.");
+                    if out_free.is_some_and(|f| f < total) {
+                        ui.colored_label(ui.visuals().error_fg_color, "Not enough space in the output folder");
+                    } else if temp_free.is_some_and(|f| f < temp) {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "Not enough temporary space: temporary files will go to the output folder",
+                        );
+                    }
                 }
                 Some(Err(e)) => {
                     ui.colored_label(ui.visuals().error_fg_color, e);
@@ -243,6 +396,17 @@ impl App {
             if pending > 0 {
                 ui.colored_label(ui.visuals().warn_fg_color, format!("{pending} clip(s) still being read; wait before exporting"));
             }
+            egui::CollapsingHeader::new("Encoders on this computer").id_salt("enc-list").show(ui, |ui| {
+                if !self.encoders_detected() {
+                    ui.weak("Still testing the hardware encoders…");
+                }
+                for e in &self.encoders.working {
+                    ui.label(format!("{}: works", encoders::describe(e)));
+                }
+                for (e, why) in &self.encoders.failed {
+                    ui.weak(format!("{}: not available ({why})", encoders::describe(e)));
+                }
+            });
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -271,7 +435,8 @@ impl App {
             self.apply_output_settings();
         }
         if (modal.should_close() || close || start) && self.script.is_none() {
-            // remember the folder choice (once, not on every keystroke)
+            // remember the folder and export choices (once, not on every keystroke)
+            self.config.remember_export(&self.project.export);
             self.config.save();
         }
         if modal.should_close() || close {
@@ -361,6 +526,12 @@ impl App {
             step: "Starting".into(),
         }));
         let log = Arc::new(Mutex::new(Vec::new()));
+        let session = self.export.session_log.clone();
+        session.lock().unwrap().push(format!(
+            "# export of {} output(s), {:?} mode",
+            plan.outputs.len(),
+            plan.encoding
+        ));
         let (tx, rx) = channel();
         {
             let (cancel, progress, log) = (cancel.clone(), progress.clone(), log.clone());
@@ -371,12 +542,23 @@ impl App {
                     let sink: LogSink = {
                         let log = log.clone();
                         Arc::new(move |l: LogLine<'_>| {
-                            let line = match l {
-                                LogLine::Command(c) => format!("$ {c}"),
-                                LogLine::Stderr(s) => format!("  {s}"),
-                                LogLine::Info(s) => format!("i {s}"),
+                            // commands and notes also go to the session's command log
+                            // and the log file; ffmpeg's stderr only to this job's log
+                            let (line, keep) = match l {
+                                LogLine::Command(c) => (format!("$ {c}"), true),
+                                LogLine::Stderr(s) => (format!("  {s}"), false),
+                                LogLine::Info(s) => (format!("i {s}"), true),
                             };
-                            tracing::debug!("{line}");
+                            if keep {
+                                tracing::info!("{line}");
+                                let mut s = session.lock().unwrap();
+                                s.push(line.clone());
+                                if s.len() > 20000 {
+                                    s.drain(..5000);
+                                }
+                            } else {
+                                tracing::debug!("{line}");
+                            }
                             let mut v = log.lock().unwrap();
                             v.push(line);
                             if v.len() > 5000 {
@@ -482,6 +664,9 @@ impl App {
                         for p in &v.problems {
                             ui.colored_label(ui.visuals().warn_fg_color, format!("Problem: {p}"));
                         }
+                        for n in &r.notes {
+                            ui.weak(format!("Note: {n}"));
+                        }
                         ui.horizontal(|ui| {
                             if ui.button("Show in folder").clicked() {
                                 reveal(&r.path);
@@ -533,15 +718,214 @@ impl App {
     }
 }
 
-fn log_view(ui: &mut egui::Ui, log: &[String]) {
-    egui::ScrollArea::vertical()
-        .max_height(260.0)
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for l in log.iter().rev().take(400).rev() {
-                ui.monospace(l);
+/// Encoder dropdown: Auto + the working encoders for `codec`. Returns "changed".
+fn encoder_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    choice: &mut Option<String>,
+    codec: VideoCodec,
+    set: &EncoderSet,
+) -> bool {
+    let mut changed = false;
+    let options: Vec<&String> = set
+        .working
+        .iter()
+        .filter(|e| encoders::codec_of_encoder(e) == Some(codec))
+        .collect();
+    // switching the codec keeps the encoder family: hevc_nvenc ↔ h264_nvenc,
+    // libx265 ↔ libx264 (only once that encoder is known to work; until hardware
+    // detection finishes, the choice is kept as it is)
+    if let Some(c) = choice.clone()
+        && encoders::codec_of_encoder(&c) != Some(codec)
+        && let Some(other) = encoders::counterpart(&c, codec).filter(|o| options.contains(&o))
+    {
+        *choice = Some(other);
+        changed = true;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Encoder");
+        // a remembered encoder of another codec, or not (yet) detected as working,
+        // is kept but not used: the planner falls back to Auto
+        let shown = match choice.as_deref() {
+            None => "Auto".to_string(),
+            Some(c) if options.iter().any(|o| *o == c) => encoders::describe(c),
+            Some(c) => format!("{} (not available here: Auto)", encoders::describe(c)),
+        };
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(shown)
+            .width(260.0)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(choice, None, "Auto")
+                    .on_hover_text(
+                        "Software for screen recordings below 4K (sharpest text, smallest files); \
+                         otherwise the first working hardware encoder",
+                    )
+                    .changed();
+                for e in options {
+                    changed |= ui
+                        .selectable_value(choice, Some(e.clone()), encoders::describe(e))
+                        .changed();
+                }
+            });
+    });
+    changed
+}
+
+/// Quality: match source / CRF-CQ value / bitrate. Returns "changed".
+fn quality_ui(ui: &mut egui::Ui, id: &str, q: &mut Quality) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Quality");
+        let shown = match q {
+            Quality::MatchSource => "Match source",
+            Quality::Crf(_) => "Constant quality",
+            Quality::BitrateKbps(_) => "Bitrate",
+        };
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                let was = q.clone();
+                if ui
+                    .selectable_label(matches!(q, Quality::MatchSource), "Match source")
+                    .on_hover_text("Calibrated presets that look like the source (x264 CRF 18, NVENC CQ 19, …)")
+                    .clicked()
+                {
+                    *q = Quality::MatchSource;
+                }
+                if ui
+                    .selectable_label(matches!(q, Quality::Crf(_)), "Constant quality")
+                    .on_hover_text("CRF (software) or CQ/QP (hardware): lower = better and larger; 18–28 is typical")
+                    .clicked()
+                    && !matches!(q, Quality::Crf(_))
+                {
+                    *q = Quality::Crf(23);
+                }
+                if ui
+                    .selectable_label(matches!(q, Quality::BitrateKbps(_)), "Bitrate")
+                    .on_hover_text("Average video bitrate; predictable size")
+                    .clicked()
+                    && !matches!(q, Quality::BitrateKbps(_))
+                {
+                    *q = Quality::BitrateKbps(8000);
+                }
+                changed |= *q != was;
+            });
+        match q {
+            Quality::Crf(c) => {
+                changed |= ui.add(egui::DragValue::new(c).range(0..=51)).changed();
             }
-        });
+            Quality::BitrateKbps(b) => {
+                changed |= ui
+                    .add(egui::DragValue::new(b).range(100..=200_000).speed(50).suffix(" kbps"))
+                    .changed();
+            }
+            Quality::MatchSource => {}
+        }
+    });
+    changed
+}
+
+/// Codec, encoder, quality, resolution, frame rate and content type (§6.0).
+fn full_options(ui: &mut egui::Ui, f: &mut FullEncodeSettings, set: &EncoderSet, changed: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.label("Codec");
+        *changed |= ui.radio_value(&mut f.codec, VideoCodec::H264, "H.264").on_hover_text("Plays everywhere").changed();
+        *changed |= ui
+            .radio_value(&mut f.codec, VideoCodec::Hevc, "HEVC (H.265)")
+            .on_hover_text("About 30% smaller at the same quality; keeps 10-bit sources 10-bit")
+            .changed();
+    });
+    *changed |= encoder_combo(ui, "full-enc", &mut f.encoder, f.codec, set);
+    *changed |= quality_ui(ui, "full-q", &mut f.quality);
+    ui.horizontal(|ui| {
+        ui.label("Size");
+        let shown = match f.resolution {
+            Resolution::Same => "Same as source".to_string(),
+            Resolution::ShortSide(s) => format!("{s}p"),
+            Resolution::Custom(..) => "Custom".to_string(),
+        };
+        egui::ComboBox::from_id_salt("full-res")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                *changed |= ui.selectable_value(&mut f.resolution, Resolution::Same, "Same as source").changed();
+                for s in [2160, 1440, 1080, 720] {
+                    *changed |= ui
+                        .selectable_value(&mut f.resolution, Resolution::ShortSide(s), format!("{s}p"))
+                        .on_hover_text("The short side; portrait video stays portrait and keeps its aspect ratio")
+                        .changed();
+                }
+                if ui
+                    .selectable_label(matches!(f.resolution, Resolution::Custom(..)), "Custom")
+                    .clicked()
+                    && !matches!(f.resolution, Resolution::Custom(..))
+                {
+                    f.resolution = Resolution::Custom(1920, 1080);
+                    *changed = true;
+                }
+            });
+        if let Resolution::Custom(w, h) = &mut f.resolution {
+            *changed |= ui.add(egui::DragValue::new(w).range(64..=7680)).changed();
+            ui.label("×");
+            *changed |= ui.add(egui::DragValue::new(h).range(64..=4320)).changed();
+        }
+        ui.add_space(12.0);
+        ui.label("Frame rate");
+        let shown = f.fps.map_or("Keep original timing".to_string(), |r| format!("{r} fps"));
+        egui::ComboBox::from_id_salt("full-fps")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                *changed |= ui
+                    .selectable_value(&mut f.fps, None, "Keep original timing")
+                    .on_hover_text("Every frame keeps its time (variable frame rate stays variable): no duplicated frames")
+                    .changed();
+                for r in [15, 24, 25, 30, 50, 60] {
+                    *changed |= ui.selectable_value(&mut f.fps, Some(r), format!("{r} fps")).changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Content");
+        let shown = match f.content {
+            ContentType::Auto => "Detect",
+            ContentType::Screen => "Screen recording",
+            ContentType::Camera => "Camera",
+        };
+        egui::ComboBox::from_id_salt("full-content")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                *changed |= ui
+                    .selectable_value(&mut f.content, ContentType::Auto, "Detect")
+                    .on_hover_text("Screen recording when the file says Bandicam/OBS or skips unchanged frames")
+                    .changed();
+                *changed |= ui
+                    .selectable_value(&mut f.content, ContentType::Screen, "Screen recording")
+                    .on_hover_text("Keyframe every 10 s, no B-frames, software encoder by default below 4K")
+                    .changed();
+                *changed |= ui
+                    .selectable_value(&mut f.content, ContentType::Camera, "Camera")
+                    .on_hover_text("Keyframe every 2 s, B-frames, hardware encoder by default")
+                    .changed();
+            });
+    });
+}
+
+/// Log lines in a scroll area. In a dialog the area gets half the window's
+/// height; without an explicit minimum, egui shrinks it to ~4 lines there.
+fn log_view(ui: &mut egui::Ui, log: &[String]) {
+    let h = (ui.ctx().content_rect().height() * 0.5).max(160.0);
+    egui::ScrollArea::vertical()
+        .min_scrolled_height(h)
+        .max_height(h)
+        .auto_shrink([false, true])
+        .stick_to_bottom(true)
+        .show(ui, |ui| log_lines(ui, log));
+}
+
+fn log_lines(ui: &mut egui::Ui, log: &[String]) {
+    for l in log.iter().rev().take(2000).rev() {
+        ui.monospace(l);
+    }
 }
 
 fn fmt_dur(secs: f64) -> String {
@@ -557,8 +941,12 @@ fn fmt_dur(secs: f64) -> String {
 pub fn reveal(path: &Path) {
     #[cfg(windows)]
     {
+        // Explorer wants `/select,"C:\a b\c.mp4"`: the standard quoting of the whole
+        // argument ("/select,C:\a b\c.mp4") makes it ignore the path and open
+        // Documents. Windows paths can't contain `"`, so raw quoting is safe.
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
+            .raw_arg(format!("/select,\"{}\"", path.display()))
             .spawn();
     }
     #[cfg(not(windows))]

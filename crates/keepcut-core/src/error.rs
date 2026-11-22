@@ -21,6 +21,9 @@ pub enum Error {
     Probe { path: PathBuf, msg: String },
     #[error("cannot plan export: {0}")]
     Plan(String),
+    /// Not enough disk space (message says where and how much).
+    #[error("{0}")]
+    NoSpace(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]

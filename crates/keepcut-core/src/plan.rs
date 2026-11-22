@@ -45,6 +45,13 @@ pub struct OutputPlan {
     pub creation_time: Option<String>,
     /// Video codec of the output (`h264`, `hevc`, `av1`).
     pub video_codec: String,
+    /// Rough size of the finished file (bytes), for the plan summary and the
+    /// free-space check (§6.10, §6.14).
+    #[serde(default)]
+    pub est_bytes: u64,
+    /// Rough peak temp space while producing this output (intermediates + FLAC).
+    #[serde(default)]
+    pub est_temp_bytes: u64,
 }
 
 impl OutputPlan {
@@ -206,8 +213,12 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
         .map(|(i, segs)| (sig_of(video(*i)), kept_duration(segs)))
         .collect();
     let (signatures, mut target_idx) = compat::choose_target(&sig_input);
-    if let Some(o) = s.target_override.filter(|o| *o < signatures.len()) {
-        target_idx = o;
+    if let Some(i) = s
+        .target_override
+        .as_ref()
+        .and_then(|o| signatures.iter().position(|(sg, _)| sg == o))
+    {
+        target_idx = i;
     }
     let joined = s.output_mode == OutputMode::Joined;
     let target_sig = &signatures[target_idx].0;
@@ -315,8 +326,18 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
     }
 
     let mut outputs = Vec::new();
+    let mut full_desc: Vec<(usize, String)> = Vec::new();
     for (path, items) in groups {
         let mut segments = Vec::new();
+        // Full re-encode: one set of encoder settings per output, from the output's
+        // reference clip (joined → the target; separate files → the clip itself), so
+        // every piece of an output has the same pixel format, profile and GOP.
+        let ref_clip = if joined { target_ref } else { items[0].0 };
+        let full = (s.encoding == EncodingMode::Full).then(|| {
+            let r = video(ref_clip);
+            let (w, h) = s.full.resolution.apply(r.width, r.height);
+            full_encode(&infos[ref_clip], r, project, encoders, w, h)
+        });
         // per-output reference stream: joined → target; separate → the clip itself
         for (ci, si, seg) in &items {
             let info = &infos[*ci];
@@ -327,8 +348,14 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
             let pieces = match s.encoding {
                 EncodingMode::Smart if copyable => smart_pieces(info, v, seg, reference)?,
                 EncodingMode::Smart => {
-                    let enc =
-                        mismatch_encode(info, v, reference, s.smart_encoder.as_deref(), encoders);
+                    let enc = mismatch_encode(
+                        info,
+                        v,
+                        reference,
+                        s.smart_encoder.as_deref(),
+                        &s.smart_quality,
+                        encoders,
+                    );
                     let filter = Some(scale_filter(
                         reference.width,
                         reference.height,
@@ -345,16 +372,29 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
                     )]
                 }
                 EncodingMode::Full => {
-                    let (w, h) = s
-                        .full
-                        .resolution
-                        .unwrap_or((reference.width, reference.height));
-                    let enc = full_encode(info, v, project, encoders, h);
+                    let enc = full.clone().expect("set in Full mode");
+                    let (w, h) = (enc.width, enc.height);
                     let filter = if (v.width, v.height) != (w, h) || v.sar != "1:1" {
                         Some(scale_filter(w, h, &enc.pix_fmt))
                     } else {
                         None
                     };
+                    if !full_desc.iter().any(|(c, _)| c == ci) {
+                        let size = if (v.width, v.height) == (w, h) {
+                            format!("{w}×{h}")
+                        } else {
+                            format!("{}×{} scaled to {w}×{h}", v.width, v.height)
+                        };
+                        let fps = s.full.fps.map_or(String::new(), |f| format!(", {f} fps"));
+                        full_desc.push((
+                            *ci,
+                            format!(
+                                "re-encoded: {size}{fps}, {} ({})",
+                                enc.codec_label(),
+                                enc.encoder
+                            ),
+                        ));
+                    }
                     vec![encode_piece(
                         info,
                         seg.start,
@@ -414,13 +454,17 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
             EncodingMode::Smart => video(items[0].0).codec_name.clone(),
         };
         let creation_time = infos[items[0].0].creation_time.clone();
-        outputs.push(OutputPlan {
+        let mut out = OutputPlan {
             path,
             segments,
             timescale,
             creation_time,
             video_codec,
-        });
+            est_bytes: 0,
+            est_temp_bytes: 0,
+        };
+        (out.est_bytes, out.est_temp_bytes) = estimate(&out, infos, s.audio_bitrate_kbps);
+        outputs.push(out);
     }
 
     // Verdict summaries
@@ -430,7 +474,10 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
             .flat_map(|o| &o.segments)
             .filter(|sp| sp.clip_idx == vd.clip_idx)
             .collect();
-        vd.summary = summarize(&segs, vd, s.encoding);
+        vd.summary = match full_desc.iter().find(|(c, _)| *c == vd.clip_idx) {
+            Some((_, d)) => d.clone(),
+            None => summarize(&segs, vd),
+        };
     }
 
     Ok(ExportPlan {
@@ -443,11 +490,65 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
     })
 }
 
-fn summarize(segs: &[&SegmentPlan], vd: &ClipVerdict, mode: EncodingMode) -> String {
-    let pieces: Vec<&Piece> = segs.iter().flat_map(|s| &s.pieces).collect();
-    if mode == EncodingMode::Full {
-        return "fully re-encoded (Full re-encode mode)".into();
+/// Bytes per second of a source's video (stream bit rate, else the whole file's).
+fn video_rate(info: &MediaInfo) -> f64 {
+    info.video
+        .as_ref()
+        .and_then(|v| v.bit_rate)
+        .map(|b| b as f64 / 8.0)
+        .or_else(|| (info.duration > 0.0).then(|| info.file_size as f64 / info.duration))
+        .unwrap_or(0.0)
+}
+
+/// Relative bits needed for the same quality (H.264 = 1).
+fn codec_cost(codec: &str) -> f64 {
+    match codec {
+        "hevc" => 0.7,
+        "av1" => 0.55,
+        _ => 1.0,
     }
+}
+
+/// (output bytes, peak temp bytes). Copied parts cost what they cost in the
+/// source; re-encoded parts at "match source" are assumed to cost the source's
+/// rate scaled by pixel count and codec efficiency; a bitrate setting is exact.
+fn estimate(out: &OutputPlan, infos: &[MediaInfo], audio_kbps: u32) -> (u64, u64) {
+    let mut video = 0.0;
+    for sp in &out.segments {
+        let info = &infos[sp.clip_idx];
+        let rate = video_rate(info);
+        let Some(v) = info.video.as_ref() else {
+            continue;
+        };
+        for p in &sp.pieces {
+            let d = p.end - p.start;
+            video += match &p.kind {
+                PieceKind::Copy { .. } => rate * d,
+                PieceKind::Encode { enc, .. } => match enc.quality {
+                    Quality::BitrateKbps(b) => b as f64 * 125.0 * p.out_duration,
+                    _ => {
+                        let px = (enc.width.max(1) as f64 * enc.height.max(1) as f64)
+                            / (v.width.max(1) as f64 * v.height.max(1) as f64);
+                        let out_codec = encoders::codec_of_encoder(&enc.encoder).map_or("h264", |c| match c {
+                            VideoCodec::H264 => "h264",
+                            VideoCodec::Hevc => "hevc",
+                            VideoCodec::Av1 => "av1",
+                        });
+                        rate * d * px * codec_cost(out_codec) / codec_cost(&v.codec_name)
+                    }
+                },
+            };
+        }
+    }
+    let dur = out.duration();
+    let audio = audio_kbps as f64 * 125.0 * dur;
+    let flac = 100_000.0 * dur;
+    // MPEG-TS intermediates carry ~5% container overhead
+    ((video + audio) as u64, (video * 1.05 + flac) as u64)
+}
+
+fn summarize(segs: &[&SegmentPlan], vd: &ClipVerdict) -> String {
+    let pieces: Vec<&Piece> = segs.iter().flat_map(|s| &s.pieces).collect();
     if !vd.copyable {
         return format!("fully re-encoded: {}", vd.reasons.join("; "));
     }
@@ -629,6 +730,7 @@ fn base_encode(
     role: Role,
     quality: Quality,
     like: &VideoStream,
+    width: u32,
     height: u32,
 ) -> VideoEncode {
     let codec = encoders::codec_of_name(&like.codec_name).unwrap_or(VideoCodec::H264);
@@ -646,6 +748,7 @@ fn base_encode(
         bframes: if like.has_b_frames == 0 { 0 } else { 2 },
         gop: None,
         tune: None,
+        width,
         height,
     }
 }
@@ -658,6 +761,7 @@ fn head_encode(_src: &VideoStream, reference: &VideoStream) -> VideoEncode {
         Role::Head,
         Quality::MatchSource,
         reference,
+        reference.width,
         reference.height,
     )
 }
@@ -668,22 +772,23 @@ fn mismatch_encode(
     src: &VideoStream,
     reference: &VideoStream,
     choice: Option<&str>,
+    quality: &Quality,
     encoders: &EncoderSet,
 ) -> VideoEncode {
     let codec = encoders::codec_of_name(&reference.codec_name).unwrap_or(VideoCodec::H264);
-    let enc = match choice {
-        Some(e) if encoders.has(e) => e.to_string(),
-        _ if is_screen_content(info, src) => encoders::software_encoder(codec).to_string(),
-        _ => encoders
-            .first_hardware(codec)
-            .unwrap_or(encoders::software_encoder(codec))
-            .to_string(),
-    };
+    let enc = pick_encoder(
+        codec,
+        choice,
+        is_screen_content(info, src),
+        reference.height,
+        encoders,
+    );
     let mut ve = base_encode(
         &enc,
         Role::Long,
-        Quality::MatchSource,
+        quality.clone(),
         reference,
+        reference.width,
         reference.height,
     );
     if !encoders::is_software(&enc) {
@@ -692,12 +797,34 @@ fn mismatch_encode(
     ve
 }
 
-/// Full re-encode settings for one clip.
+/// Encoder for a whole re-encode: the user's choice if it works and fits the
+/// codec; Auto = software for screen recordings below 4K (sharper text, VFR
+/// friendly), else the first working hardware encoder (software x265 at 4K is
+/// very slow, §6.14), else software.
+pub fn pick_encoder(
+    codec: VideoCodec,
+    choice: Option<&str>,
+    screen: bool,
+    height: u32,
+    encoders: &EncoderSet,
+) -> String {
+    let sw = encoders::software_encoder(codec);
+    // a choice made for the other codec means the same family (NVENC → NVENC)
+    let choice = choice.and_then(|c| encoders::counterpart(c, codec));
+    match choice {
+        Some(e) if encoders.has(&e) => e,
+        _ if screen && height < 2160 => sw.to_string(),
+        _ => encoders.first_hardware(codec).unwrap_or(sw).to_string(),
+    }
+}
+
+/// Full re-encode settings for an output whose reference clip is `src`.
 fn full_encode(
     info: &MediaInfo,
     src: &VideoStream,
     project: &Project,
     encoders: &EncoderSet,
+    out_w: u32,
     out_h: u32,
 ) -> VideoEncode {
     let f = &project.export.full;
@@ -706,12 +833,7 @@ fn full_encode(
         ContentType::Camera => false,
         ContentType::Auto => is_screen_content(info, src),
     };
-    let sw = encoders::software_encoder(f.codec);
-    let enc = match f.encoder.as_deref() {
-        Some(e) if encoders.has(e) => e.to_string(),
-        _ if screen => sw.to_string(),
-        _ => encoders.first_hardware(f.codec).unwrap_or(sw).to_string(),
-    };
+    let enc = pick_encoder(f.codec, f.encoder.as_deref(), screen, out_h, encoders);
     let ten_bit = f.codec != VideoCodec::H264 && src.bit_depth() >= 10;
     let fps_for_gop = f
         .fps
@@ -743,6 +865,7 @@ fn full_encode(
         // keyframes are expensive (2 s GOPs measured +64% size on Bandicam footage)
         gop: Some(fps_for_gop * if screen { 10 } else { 2 }),
         tune: None,
+        width: out_w,
         height: out_h,
     }
 }
@@ -1122,6 +1245,68 @@ mod tests {
             }
         ));
         assert_eq!(plan.outputs[0].path, PathBuf::from("/x/a - joined.mp4"));
+    }
+
+    #[test]
+    fn full_reencode_one_setting_per_output() {
+        use crate::model::Resolution;
+        let pk = packets();
+        let mut b = info("/x/b.mp4", 1280, 720, &pk, 0);
+        b.encoder = None;
+        if let Some(v) = b.video.as_mut() {
+            v.codec_name = "hevc".into();
+            v.pix_fmt = "yuv420p10le".into();
+        }
+        let infos = vec![info("/x/a.mp4", 1920, 1080, &pk, 0), b];
+        let mut p = project(vec![("/x/a.mp4", None), ("/x/b.mp4", Some(vec![(0.0, 1.0)]))]);
+        p.export.encoding = EncodingMode::Full;
+        p.export.full.codec = VideoCodec::Hevc;
+        p.export.full.resolution = Resolution::ShortSide(720);
+        let plan = build(&p, &infos, &EncoderSet::software_only()).unwrap();
+        let encs: Vec<&VideoEncode> = plan.outputs[0]
+            .segments
+            .iter()
+            .flat_map(|s| &s.pieces)
+            .map(|p| match &p.kind {
+                PieceKind::Encode { enc, .. } => enc.as_ref(),
+                _ => panic!("Full mode copies nothing"),
+            })
+            .collect();
+        // the target (a, the longer kept part) is 8-bit: every piece is 8-bit 1280×720
+        assert!(encs.iter().all(|e| **e == *encs[0]));
+        assert_eq!((encs[0].width, encs[0].height), (1280, 720));
+        assert_eq!(encs[0].pix_fmt, "yuv420p");
+        assert_eq!(encs[0].encoder, "libx265");
+        assert!(plan.clips[0].summary.contains("1920×1080 scaled to 1280×720"));
+        assert!(plan.outputs[0].est_bytes > 0 && plan.outputs[0].est_temp_bytes > 0);
+
+        // separate files: each output follows its own source (b stays 10-bit)
+        p.export.output_mode = OutputMode::PerClip;
+        let plan = build(&p, &infos, &EncoderSet::software_only()).unwrap();
+        let first_enc = |o: &OutputPlan| match &o.segments[0].pieces[0].kind {
+            PieceKind::Encode { enc, .. } => enc.as_ref().clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(first_enc(&plan.outputs[1]).pix_fmt, "yuv420p10le");
+        assert_eq!(first_enc(&plan.outputs[0]).pix_fmt, "yuv420p");
+    }
+
+    #[test]
+    fn auto_encoder_choice() {
+        let set = EncoderSet {
+            working: vec!["h264_nvenc".into(), "hevc_qsv".into(), "libx264".into(), "libx265".into()],
+            failed: vec![],
+        };
+        // screen recordings below 4K: software; camera or 4K: hardware
+        assert_eq!(pick_encoder(VideoCodec::H264, None, true, 1080, &set), "libx264");
+        assert_eq!(pick_encoder(VideoCodec::H264, None, true, 2160, &set), "h264_nvenc");
+        assert_eq!(pick_encoder(VideoCodec::Hevc, None, false, 1080, &set), "hevc_qsv");
+        // a choice for the other codec means the same family, if that one works
+        assert_eq!(pick_encoder(VideoCodec::Hevc, Some("h264_qsv"), true, 1080, &set), "hevc_qsv");
+        assert_eq!(pick_encoder(VideoCodec::Hevc, Some("libx264"), false, 1080, &set), "libx265");
+        // ... otherwise Auto (hevc_nvenc is not in the set)
+        assert_eq!(pick_encoder(VideoCodec::Hevc, Some("h264_nvenc"), false, 1080, &set), "hevc_qsv");
+        assert_eq!(pick_encoder(VideoCodec::H264, Some("libx264"), false, 2160, &set), "libx264");
     }
 
     #[test]

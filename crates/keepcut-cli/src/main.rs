@@ -8,8 +8,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use keepcut_core::encoders::{self, EncoderSet};
 use keepcut_core::exec::{self, ExecOptions};
+use keepcut_core::fsutil;
 use keepcut_core::ffmpeg::{CancelToken, LogLine, LogSink, Tools};
-use keepcut_core::model::{EncodingMode, OutputMode, Project};
+use keepcut_core::model::{EncodingMode, OutputMode, Project, Quality, Resolution, VideoCodec};
 use keepcut_core::plan::{self, PieceKind};
 use keepcut_core::probe::{self, MediaInfo};
 use keepcut_core::timefmt;
@@ -75,6 +76,30 @@ struct Overrides {
     out_dir: Option<PathBuf>,
     #[arg(long)]
     out_name: Option<String>,
+    /// Full re-encode codec.
+    #[arg(long, value_enum)]
+    codec: Option<Codec>,
+    /// Encoder for whole re-encodes (Full mode, or mismatched clips in Smart mode).
+    #[arg(long)]
+    encoder: Option<String>,
+    /// Full re-encode resolution: same, a short side such as 1080, or WxH.
+    #[arg(long)]
+    res: Option<String>,
+    /// Full re-encode constant frame rate.
+    #[arg(long)]
+    fps: Option<u32>,
+    /// CRF/CQ value for whole re-encodes.
+    #[arg(long, conflicts_with = "bitrate")]
+    crf: Option<u32>,
+    /// Target video bitrate (kbps) for whole re-encodes.
+    #[arg(long)]
+    bitrate: Option<u32>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Codec {
+    H264,
+    Hevc,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -127,7 +152,7 @@ fn main() -> Result<()> {
         }
         Command::Plan { project, ov, json } => {
             let (p, infos) = load(&tools, &project, &ov, &log)?;
-            let plan = plan::build(&p, &infos, &EncoderSet::software_only())?;
+            let plan = plan::build(&p, &infos, &encoders::detect(&tools, None, Some(&log))?)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             } else {
@@ -196,6 +221,9 @@ fn main() -> Result<()> {
                     v.frames,
                     v.expected_frames
                 );
+                for n in &r.notes {
+                    println!("  note: {n}");
+                }
                 for (what, secs) in &r.timings {
                     if verbose >= 1 {
                         println!("  {secs:7.2} s  {what}");
@@ -257,6 +285,27 @@ fn load(
     }
     if let Some(n) = &ov.out_name {
         p.export.output_name = Some(n.clone());
+    }
+    let x = &mut p.export;
+    if let Some(c) = ov.codec {
+        x.full.codec = match c {
+            Codec::H264 => VideoCodec::H264,
+            Codec::Hevc => VideoCodec::Hevc,
+        };
+    }
+    if let Some(e) = &ov.encoder {
+        x.full.encoder = Some(e.clone());
+        x.smart_encoder = Some(e.clone());
+    }
+    if let Some(r) = &ov.res {
+        x.full.resolution = parse_res(r)?;
+    }
+    if ov.fps.is_some() {
+        x.full.fps = ov.fps;
+    }
+    if let Some(q) = ov.crf.map(Quality::Crf).or(ov.bitrate.map(Quality::BitrateKbps)) {
+        x.full.quality = q.clone();
+        x.smart_quality = q;
     }
     let mut infos = Vec::new();
     for c in &p.clips {
@@ -343,9 +392,11 @@ fn print_plan(plan: &plan::ExportPlan, infos: &[MediaInfo]) {
     }
     for o in &plan.outputs {
         println!(
-            "Output {} ({})",
+            "Output {} ({}, about {}, temp {})",
             o.path.display(),
-            timefmt::display(o.duration())
+            timefmt::display(o.duration()),
+            fsutil::human_bytes(o.est_bytes),
+            fsutil::human_bytes(o.est_temp_bytes)
         );
         for s in &o.segments {
             println!(
@@ -373,4 +424,14 @@ fn print_plan(plan: &plan::ExportPlan, infos: &[MediaInfo]) {
             }
         }
     }
+}
+
+fn parse_res(s: &str) -> Result<Resolution> {
+    if s.eq_ignore_ascii_case("same") {
+        return Ok(Resolution::Same);
+    }
+    if let Some((w, h)) = s.split_once(['x', 'X', '×']) {
+        return Ok(Resolution::Custom(w.trim().parse()?, h.trim().parse()?));
+    }
+    Ok(Resolution::ShortSide(s.trim_end_matches('p').parse()?))
 }

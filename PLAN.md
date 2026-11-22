@@ -1,6 +1,6 @@
 # Keepcut — Implementation Plan
 
-Status: **Phase 0A (export pipeline) and Phase 0B (player) spikes done** on the author's Windows laptop (results and decisions: §3.3–3.5); **Phase 1 (MVP GUI) in progress** since 2026-11-18. Open spike items are listed in §11. Plan written and finalized 2026-11-17.
+Status: **Phase 0A (export pipeline) and Phase 0B (player) spikes done** on the author's Windows laptop (results and decisions: §3.3–3.5); **Phase 1 (MVP GUI) built, awaiting the author's hands-on test; Phase 2 (export completeness) first pass done** (2026-11-18). Open spike items are listed in §11. Plan written and finalized 2026-11-17.
 This document is self-contained: it assumes no access to the planning conversation.
 
 ### Start here (for the implementer)
@@ -830,9 +830,9 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
 **0A status (2026-11-17):** implemented; all acceptance runs pass on the available samples in both modes (§3.3). Still open:
 - player check of the outputs in mpv, VLC, a browser, Windows Media Player, and one unlisted YouTube upload (outputs from `keepcut-cli export … --out-dir samples/out`);
 - longer Bandicam QSV recordings (H.264 + HEVC, ≥ 60 s with activity) and a real 4K clip from the author;
-- hardware heads ("Fast heads", §6.14): hevc_nvenc/h264_nvenc heads, their speed, SSIM and seam compatibility;
+- hardware heads ("Fast heads", §6.14): hevc_nvenc/h264_nvenc heads, their speed, SSIM and seam compatibility (hardware whole-segment re-encodes are verified, Phase 2);
 - loudness (§6.9) is Phase 3 and not implemented; chapters are implemented in core but not yet exercised by a corpus run;
-- free-space check (§6.10) and encoder re-test with the real target parameters (§6.8) are not implemented yet.
+- free-space check (§6.10) and encoder re-test with the real target parameters (§6.8): implemented in Phase 2.
 
 **0B Player spike** (minimal eframe/glow app): open a file; play/pause; seek; frame step both ways; keyframe jump; EDL cut preview; the GL render path and the SW fallback.
 - **Accept** on the performance gate in §7. Record the results in this file.
@@ -871,6 +871,52 @@ GitHub Actions matrix (windows-latest, ubuntu-latest, macos-latest): `cargo fmt 
 - Encoder selection UI; hardware encoders for long re-encodes (NVENC, AMF, VAAPI, QSV).
 - Export plan summary; soft-key warnings; free-space check; command log panel.
 - HEVC sources end-to-end: libx265 heads, 10-bit, HEVC Full re-encode. The MPEG-TS intermediate route already exists from Phase 1, so copying HEVC is safe from the start.
+- **Status (2026-11-18, first pass, not yet committed):** all items above implemented.
+  - **Export dialog:**
+    - target format dropdown (joined, when formats differ; stored as the format itself, not an index, so trims can't silently switch it);
+    - Smart: encoder and quality for whole re-encoded clips;
+    - Full: codec, encoder, quality (match source / constant quality / bitrate), size (same / 2160p / 1440p / 1080p / 720p / custom), frame rate (keep timing / 15–60), content (detect / screen / camera);
+    - audio (mix all / first track, AAC 128–320 kbps);
+    - estimated output size, temp space and free space;
+    - "Encoders on this computer" with the reason each unavailable one failed.
+    - All choices are remembered in the config.
+  - **Resolution presets** set the *short* side (portrait stays portrait; 1366×768 at 720p → 1280×720), even dimensions. `model::Resolution`.
+  - **Full re-encode:** one `VideoEncode` per output, from the output's reference clip (joined: the target; separate files: the clip itself). So every piece of a joined file has the same pixel format, profile and GOP. Before, a 10-bit clip in an 8-bit join got its own 10-bit pieces.
+  - **Auto encoder** (`plan::pick_encoder`): software for screen recordings below 2160p; otherwise the first working hardware encoder for the codec, else software. An explicit choice is used only if it works and matches the codec.
+  - **Encoder re-test (§6.8):** before an export, every distinct hardware encode is test-encoded with its exact arguments at the output size (`encoders::test_encode`). Failures switch to libx264/libx265, with a note in the finish window. If a hardware encode still fails on real content, that piece is retried once in software.
+  - **Unavailable-encoder reasons** come from ffmpeg's first message, e.g. "DLL amfrt64.dll failed to open" or "Current codec type is unsupported" (av1_qsv on this laptop).
+  - **Free space (§6.10):**
+    - `OutputPlan.est_bytes` / `est_temp_bytes`: copies cost their source bytes; re-encodes cost the source rate × pixel ratio × codec efficiency; a set bitrate is used exactly.
+    - Measured against real outputs, the estimates were within ~2× (10-bit HEVC on Quick Sync: 4× under). So the check refuses only when 1.5× the estimate doesn't fit.
+    - Too little OS temp space moves the temp dir to `<output folder>/.keepcut-tmp-*`.
+    - Each output's intermediates are deleted as soon as it is done, so peak temp = the largest output.
+  - **Command log panel** (toolbar "Log"): every ffmpeg command and note of the session, shell-quoted, with Copy all. Commands also go to the log file at info level.
+  - **CLI:** `--codec --encoder --res --fps --crf --bitrate`. Script commands: `set KEY VALUE`, `wait-encoders`, `log-panel`.
+  - **Verified on this laptop:** all with exact duration, A−V 0 and every frame present.
+
+    | Run | Encoder | Result |
+    |---|---|---|
+    | Full HEVC Auto, 4K Bandicam | picked hevc_nvenc | 16.467 s |
+    | Full H.264, 4K | h264_qsv | 15.333 s |
+    | Full HEVC, 4K → 1080p | hevc_qsv | 16.467 s |
+    | Full HEVC 4K60 10-bit (stays Main10) | hevc_nvenc | 10.100 s |
+    | Full HEVC 4K60 10-bit | hevc_qsv | 10.100 s |
+    | NVENC set at 720p / 30 fps CFR | h264_nvenc | 89.667 s, 2690 frames |
+    | NVENC set, 1500 kbps | hevc_nvenc | 89.667 s |
+    | NVENC set, software HEVC | libx265 | 89.667 s |
+    | Smart, mixed H.264/HEVC/AV1 4K, mismatched clips | hevc_nvenc | 16.000 s |
+    | Per-segment Full | h264_qsv | 2 files |
+
+    Through the GUI script:
+    - Full HEVC 720p/30 fps CRF 26 (219.867 s, 6596 frames);
+    - target override to 720p;
+    - per-clip Smart (3 files, all copied).
+
+    Synthetic tests added: Full HEVC 10-bit with 4:3 + 16:9 sources, downscale and 25 fps; per-clip / per-segment naming and "(2)" suffixes; resolution presets; Auto encoder choice; refusing when out of space.
+  - **Not done / open:**
+    - "Fast heads" with hardware encoders (§6.14). Heads/tails still always use libx264/libx265.
+    - AMF and VAAPI are untested (no such hardware here; AMD laptop pending).
+    - Size estimates for heavily static screen content at a forced frame rate are rough.
 
 ### Phase 3 — Comfort features
 - Loudness normalization (§6.9); chapters + YouTube block (§6.13).
