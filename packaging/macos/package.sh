@@ -32,6 +32,12 @@ dylibbundler -od -b -cd \
   -d "$app/Contents/Frameworks/" \
   -p @executable_path/../Frameworks/
 
+# Smart cuts of AV1 clips need a software AV1 encoder; Homebrew's ffmpeg has SVT-AV1.
+if ! "$app/Contents/MacOS/ffmpeg" -hide_banner -encoders | grep -q libsvtav1; then
+  echo "the bundled ffmpeg has no libsvtav1 encoder" >&2
+  exit 1
+fi
+
 # Icon
 iconset=$(mktemp -d)/keepcut.iconset
 mkdir -p "$iconset"

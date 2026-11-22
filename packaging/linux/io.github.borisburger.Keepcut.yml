@@ -3,7 +3,7 @@
 # Build a single-file bundle (from the repo root, on Linux with flatpak-builder):
 #   packaging/linux/build-flatpak.sh
 #
-# ffmpeg (GPL: x264, x265, NVENC, VA-API) and libmpv are built here, because the runtime's
+# ffmpeg (GPL: x264, x265, SVT-AV1, NVENC, VA-API) and libmpv are built here, because the runtime's
 # FFmpeg lacks the encoders Keepcut needs and the runtime has no ffmpeg/ffprobe binaries.
 app-id: io.github.borisburger.Keepcut
 runtime: org.freedesktop.Platform
@@ -67,6 +67,24 @@ modules:
         url: https://download.videolan.org/videolan/x265/x265_4.2.tar.gz
         sha256: 40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210
 
+  - name: svt-av1
+    # AV1 encoder for smart cuts of AV1 clips (the parts from a cut to the next keyframe).
+    # Needs NASM (in the SDK) for its assembly; without it SVT-AV1 is very slow.
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_LIBDIR=lib
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_APPS=OFF
+      - -DBUILD_TESTING=OFF
+    post-install:
+      - install -Dm644 LICENSE.md PATENTS.md -t /app/share/licenses/svt-av1/
+    sources:
+      - type: git
+        url: https://gitlab.com/AOMediaCodec/SVT-AV1.git
+        tag: v4.3.0
+        commit: e3d63405f9ba8219913a7276c2c47d10e5d022fe
+
   - name: ffmpeg
     config-opts:
       - --enable-gpl
@@ -78,6 +96,7 @@ modules:
       - --enable-libx264
       - --enable-libx265
       - --enable-libdav1d
+      - --enable-libsvtav1
       - --enable-libopus
       - --enable-libvpx
       - --enable-libmp3lame

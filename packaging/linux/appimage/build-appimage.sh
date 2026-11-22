@@ -2,7 +2,7 @@
 # Builds the Keepcut AppImage. Runs inside the AlmaLinux 9 build environment
 # (packaging/linux/appimage/build.sh starts it in a container; CI runs it in almalinux:9).
 #
-# Builds ffmpeg (GPL: x264, x265, dav1d, NVENC/NVDEC, VA-API), libplacebo, libass and libmpv into
+# Builds ffmpeg (GPL: x264, x265, dav1d, SVT-AV1, NVENC/NVDEC, VA-API), libplacebo, libass and libmpv into
 # $work/prefix (each once; kept between runs when $work is a volume), then Keepcut, then bundles
 # everything with linuxdeploy. Libraries that must come from the user's system (glibc,
 # OpenGL/EGL/Mesa, NVIDIA driver, X11/Wayland, audio, fontconfig/freetype) are not bundled;
@@ -98,16 +98,28 @@ if ! done_ dav1d-1.5.5; then
   mark dav1d-1.5.5
 fi
 
-if ! done_ ffmpeg-9.1; then
+# SVT-AV1: the AV1 encoder for smart cuts of AV1 clips; NASM (deps-el9.sh) builds its assembly.
+if ! done_ svt-av1-v4.3.0; then
+  step svt-av1
+  git_at https://gitlab.com/AOMediaCodec/SVT-AV1.git v4.3.0 "$bld/svt-av1" e3d63405f9ba8219913a7276c2c47d10e5d022fe
+  cmake -S "$bld/svt-av1" -B "$bld/svt-av1/out" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
+    -DBUILD_SHARED_LIBS=ON -DBUILD_APPS=OFF -DBUILD_TESTING=OFF
+  ninja -C "$bld/svt-av1/out" install
+  mark svt-av1-v4.3.0
+fi
+
+# The marker names the encoders, so adding one rebuilds ffmpeg in a kept work volume.
+if ! done_ ffmpeg-9.1-svtav1; then
   step ffmpeg
   f=$(fetch https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz 1a4d394ae63d190a526cd052eb4415c156b5c5e2df37efab41a7de0b8fde2433)
   rm -rf "$bld/ffmpeg" && mkdir -p "$bld/ffmpeg" && tar -xJf "$f" -C "$bld/ffmpeg" --strip-components=1
   (cd "$bld/ffmpeg" && ./configure --prefix="$prefix" \
     --enable-gpl --enable-version3 --enable-shared --disable-static --disable-doc --disable-ffplay \
-    --enable-libx264 --enable-libx265 --enable-libdav1d \
+    --enable-libx264 --enable-libx265 --enable-libdav1d --enable-libsvtav1 \
     --enable-vaapi --enable-libdrm --enable-ffnvcodec --enable-nvenc --enable-nvdec \
     && make -j"$jobs" && make install)
-  mark ffmpeg-9.1
+  mark ffmpeg-9.1-svtav1
 fi
 
 if ! done_ libplacebo-v7.387.0; then
@@ -162,7 +174,14 @@ for s in 16 32 48 64 128 256; do
 done
 install -Dm644 "$src/LICENSE" "$appdir/usr/share/licenses/keepcut/LICENSE"
 install -Dm644 "$bld/ffmpeg/COPYING.GPLv3" "$appdir/usr/share/licenses/ffmpeg/COPYING.GPLv3"
+install -Dm644 "$bld/svt-av1/LICENSE.md" "$bld/svt-av1/PATENTS.md" -t "$appdir/usr/share/licenses/svt-av1/"
 install -Dm644 "$bld/mpv/LICENSE.LGPL" "$appdir/usr/share/licenses/mpv/LICENSE.LGPL"
+
+# Smart cuts of AV1 clips need a software AV1 encoder (LD_LIBRARY_PATH finds $prefix/lib).
+if ! "$appdir/usr/bin/ffmpeg" -hide_banner -encoders | grep -q libsvtav1; then
+  echo "the bundled ffmpeg has no libsvtav1 encoder" >&2
+  exit 1
+fi
 
 linuxdeploy=$(fetch https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d)
 chmod +x "$linuxdeploy"

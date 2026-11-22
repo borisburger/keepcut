@@ -47,18 +47,18 @@ impl EncoderSet {
             .map(String::as_str)
             .find(|e| e.starts_with(prefix) && !is_software(e))
     }
-    /// The software encoder for `codec`. AV1: libaom (calibrated), or SVT-AV1 where the
-    /// ffmpeg build has no libaom (Homebrew's).
+    /// The software encoder for `codec`. AV1: SVT-AV1 (every package's ffmpeg has it), or
+    /// libaom where a system ffmpeg has only that (about 8x slower at similar quality).
     pub fn software(&self, codec: VideoCodec) -> &'static str {
         match codec {
-            VideoCodec::Av1 if !self.has("libaom-av1") && self.has("libsvtav1") => "libsvtav1",
+            VideoCodec::Av1 if !self.has("libsvtav1") && self.has("libaom-av1") => "libaom-av1",
             c => software_encoder(c),
         }
     }
     /// Only software encoders (for tests and when detection is skipped).
     pub fn software_only() -> EncoderSet {
         EncoderSet {
-            working: vec!["libx264".into(), "libx265".into(), "libaom-av1".into()],
+            working: vec!["libx264".into(), "libx265".into(), "libsvtav1".into()],
             failed: Vec::new(),
         }
     }
@@ -76,7 +76,7 @@ pub fn software_encoder(c: VideoCodec) -> &'static str {
     match c {
         VideoCodec::H264 => "libx264",
         VideoCodec::Hevc => "libx265",
-        VideoCodec::Av1 => "libaom-av1",
+        VideoCodec::Av1 => "libsvtav1",
     }
 }
 
@@ -371,7 +371,7 @@ impl VideoEncode {
                 }
             }
             ("libaom-av1", q) => {
-                // calibrated on Bandicam AV1 4K: SSIM 0.9993 at 0.42x the source size, ~9 fps
+                // Bandicam AV1 4K (NUT output): SSIM 0.9991 at 0.40-0.71x the source size, 3-9 fps
                 for (k, v) in [
                     ("-usage", "good"),
                     ("-cpu-used", "6"),
@@ -390,16 +390,17 @@ impl VideoEncode {
                 }
             }
             ("libsvtav1", q) => {
-                // not calibrated like libaom (no SVT-AV1 build at hand): presets 6–8 are
-                // SVT's middle ground, crf a little below libaom's to err on quality
-                let preset = match (self.role, big) {
-                    (Role::Head, false) => "6",
-                    (_, false) => "8",
-                    (_, true) => "10",
-                };
-                push(&mut a, "-preset", preset);
+                // SVT-AV1 4.3 on two Bandicam AV1 4K recordings (SSIM vs the source, size
+                // relative to it): preset 6 crf 28 0.9994/0.9991 at 0.81/0.88x, crf 32
+                // 0.9993/0.9988 at 0.68/0.74x, 20-26 fps. Presets 8 and 10 were 2x faster
+                // but worse and larger (preset 8 crf 32: 0.9991/0.9986 at 0.85/0.93x).
+                // Cut parts get the higher quality: they sit between copied source frames.
+                push(&mut a, "-preset", "6");
                 match q {
-                    Quality::MatchSource => push(&mut a, "-crf", "26"),
+                    Quality::MatchSource => {
+                        let crf = if self.role == Role::Head { "28" } else { "32" };
+                        push(&mut a, "-crf", crf)
+                    }
                     Quality::Crf(c) => push(&mut a, "-crf", &c.to_string()),
                     Quality::BitrateKbps(b) => push(&mut a, "-b:v", &format!("{b}k")),
                 }
@@ -567,18 +568,20 @@ mod tests {
     }
 
     #[test]
-    fn software_av1_falls_back_to_svt() {
+    fn software_av1_prefers_svt() {
         let set = |names: &[&str]| EncoderSet {
             working: names.iter().map(|s| s.to_string()).collect(),
             failed: Vec::new(),
         };
         let both = set(&["libx264", "libaom-av1", "libsvtav1"]);
-        assert_eq!(both.software(VideoCodec::Av1), "libaom-av1");
-        let svt = set(&["libx264", "libsvtav1"]);
-        assert_eq!(svt.software(VideoCodec::Av1), "libsvtav1");
-        assert_eq!(svt.software(VideoCodec::H264), "libx264");
+        assert_eq!(both.software(VideoCodec::Av1), "libsvtav1");
+        let aom = set(&["libx264", "libaom-av1"]);
+        assert_eq!(aom.software(VideoCodec::Av1), "libaom-av1");
+        assert_eq!(aom.software(VideoCodec::H264), "libx264");
+        // neither works: the name the error will mention
+        assert_eq!(set(&["libx264"]).software(VideoCodec::Av1), "libsvtav1");
         assert_eq!(codec_of_encoder("libsvtav1"), Some(VideoCodec::Av1));
-        let v = VideoEncode {
+        let mut v = VideoEncode {
             encoder: "libsvtav1".into(),
             role: Role::Head,
             quality: Quality::MatchSource,
@@ -597,8 +600,11 @@ mod tests {
         };
         assert_eq!(
             v.args().join(" "),
-            "-c:v libsvtav1 -preset 6 -crf 26 -svtav1-params irefresh-type=2 -pix_fmt yuv420p -bf 0"
+            "-c:v libsvtav1 -preset 6 -crf 28 -svtav1-params irefresh-type=2 -pix_fmt yuv420p -bf 0"
         );
+        v.role = Role::Long;
+        v.height = 2160;
+        assert!(v.args().join(" ").contains("-preset 6 -crf 32 "));
     }
 
     #[test]

@@ -52,6 +52,11 @@ jobs:
           bundle: Keepcut-${{ steps.version.outputs.version }}-linux-x86_64.flatpak
           cache-key: flatpak-builder-${{ hashFiles('packaging/linux/io.github.borisburger.Keepcut.yml') }}
           upload-artifact: false
+      # Smart cuts of AV1 clips need a software AV1 encoder: SVT-AV1, linked into libavcodec.
+      - name: Check SVT-AV1
+        run: |
+          ls flatpak_app/files/lib/libSvtAv1Enc.so*
+          grep -q libSvtAv1Enc flatpak_app/files/lib/libavcodec.so.*
       - uses: actions/upload-artifact@v7
         with:
           name: flatpak

@@ -27,7 +27,9 @@ Write-Host "Keepcut $version"
 $mpvDir = Join-Path $root "third_party\mpv"
 $ffDir = Join-Path $root "third_party\ffmpeg"
 if (-not (Test-Path (Join-Path $mpvDir "mpv.lib"))) { & (Join-Path $PSScriptRoot "fetch-mpv.ps1") }
-if (-not (Test-Path (Join-Path $ffDir "ffmpeg.exe"))) { & (Join-Path $PSScriptRoot "fetch-ffmpeg.ps1") }
+$ffReadme = Join-Path $ffDir "README.txt"
+if (-not (Test-Path (Join-Path $ffDir "avcodec-*.dll")) -or -not (Test-Path $ffReadme) -or
+    -not (Select-String -Quiet -SimpleMatch "FFmpeg-Builds" $ffReadme)) { & (Join-Path $PSScriptRoot "fetch-ffmpeg.ps1") }
 $mpvZip = Get-ChildItem $mpvDir -Filter "libmpv-v*-x86_64-w64-mingw32-*.zip" | Select-Object -First 1
 $mpvVersion = if ($mpvZip -and $mpvZip.Name -match '^libmpv-(v[\d.]+)-') { $Matches[1] } else { "unknown" }
 $ffVersion = ((& (Join-Path $ffDir "ffmpeg.exe") -hide_banner -version | Select-Object -First 1) -replace '^ffmpeg version (\S+).*$', '$1')
@@ -47,6 +49,14 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
 Copy-Item (Join-Path $target "keepcut.exe"), (Join-Path $target "keepcut-cli.exe"), (Join-Path $target "libmpv-2.dll") $stage
 Copy-Item (Join-Path $ffDir "ffmpeg.exe"), (Join-Path $ffDir "ffprobe.exe") $stage
+# The shared build's FFmpeg and codec DLLs, loaded by ffmpeg.exe and ffprobe.exe (libmpv-2.dll
+# has its own FFmpeg built in and loads none of them).
+$ffDlls = Get-ChildItem $ffDir -Filter "*.dll"
+if (-not $ffDlls) { throw "no ffmpeg DLLs in $ffDir; run packaging/windows/fetch-ffmpeg.ps1 again" }
+$ffDlls | Copy-Item -Destination $stage
+# Smart cuts of AV1 clips need a software AV1 encoder; this also checks that the DLLs load.
+$ffEncoders = & (Join-Path $stage "ffmpeg.exe") -hide_banner -encoders
+if ($LASTEXITCODE -ne 0 -or -not ($ffEncoders -match '\slibsvtav1\s')) { throw "the staged ffmpeg.exe has no libsvtav1 encoder" }
 $lic = Join-Path $stage "licenses"
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $lic "Keepcut-GPL-3.0.txt")
 Copy-Item (Join-Path $mpvDir "unpacked\LICENSE.LGPL") (Join-Path $lic "mpv-LGPL-2.1.txt")
@@ -70,9 +80,10 @@ keepcut-cli.exe is the command-line exporter (keepcut-cli --help).
 
 Third-party components (see licenses\):
 - mpv $mpvVersion (libmpv-2.dll), LGPL-2.1-or-later. Source: https://github.com/mpv-player/mpv/tree/$mpvVersion
-- FFmpeg $ffVersion (ffmpeg.exe, ffprobe.exe), GPL-3.0, built by gyan.dev.
-  Source and build configuration: https://www.gyan.dev/ffmpeg/builds/ and licenses\ffmpeg-build-README.txt;
-  FFmpeg source: https://ffmpeg.org/download.html
+- FFmpeg $ffVersion (ffmpeg.exe, ffprobe.exe and the DLLs next to them), GPL-3.0, built by
+  BtbN's FFmpeg-Builds ("win64-gpl-shared"), with libraries such as x264, x265, SVT-AV1 and
+  libaom. Build scripts and library sources: https://github.com/FFmpeg-Builds/FFmpeg-Builds and
+  licenses\ffmpeg-build-README.txt; FFmpeg source: https://ffmpeg.org/download.html
 
 Keepcut is free software under the GNU General Public License v3 or later
 (licenses\Keepcut-GPL-3.0.txt). Source: https://github.com/borisburger/keepcut

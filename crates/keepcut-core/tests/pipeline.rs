@@ -110,12 +110,21 @@ fn export_with(
 
 /// Plans and exports a whole project; asserts verification passed.
 fn export_project(t: &Tools, project: Project) -> (plan::ExportPlan, Vec<PathBuf>) {
+    export_project_using(t, project, &software_encoders(t))
+}
+
+/// Like [`export_project`] with the given encoders.
+fn export_project_using(
+    t: &Tools,
+    project: Project,
+    encoders: &EncoderSet,
+) -> (plan::ExportPlan, Vec<PathBuf>) {
     let infos: Vec<MediaInfo> = project
         .clips
         .iter()
         .map(|c| probe::probe(t, &c.path, None, None).unwrap())
         .collect();
-    let plan = plan::build(&project, &infos, &software_encoders(t)).unwrap();
+    let plan = plan::build(&project, &infos, encoders).unwrap();
     let opts = ExecOptions {
         decode_check: DecodeCheck::Full,
         ..Default::default()
@@ -772,7 +781,7 @@ fn corpus_projects() {
 }
 
 /// Fast settings for an AV1 encoder this ffmpeg has, if any. ffmpeg builds differ:
-/// BtbN's and gyan.dev's have libaom, Homebrew's has SVT-AV1 but no libaom.
+/// BtbN's and gyan.dev's full builds have both, Homebrew's has SVT-AV1 but no libaom.
 fn av1_encoder_args(t: &Tools) -> Option<&'static [&'static str]> {
     let out = ffmpeg::run_checked(
         &t.ffmpeg().args(["-hide_banner", "-encoders"]),
@@ -827,4 +836,69 @@ fn av1_nut_intermediates() {
     );
     assert!(has_copy(&plan));
     assert_eq!(plan.outputs[0].intermediate().0, "nut");
+}
+
+/// Smart cuts of an AV1 clip with each software AV1 encoder this ffmpeg has (SVT-AV1 is
+/// preferred, libaom is the fallback for an ffmpeg without it): the re-encoded cut parts
+/// must join the copied parts so that verification and a full decode pass.
+#[test]
+fn av1_smart_cut_with_each_software_encoder() {
+    let Some(t) = tools() else { return };
+    let Some(encoder) = av1_encoder_args(&t) else {
+        eprintln!("skipping: this ffmpeg has no AV1 encoder");
+        return;
+    };
+    let available = software_encoders(&t);
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = vec!["-t", "4"];
+    args.extend_from_slice(encoder);
+    args.extend_from_slice(&["-g", "30", "-c:a", "aac"]);
+    let a = make_clip(&t, dir.path(), "av1.mp4", SRC_360, &args);
+    let mut tested = 0;
+    for av1 in ["libsvtav1", "libaom-av1"] {
+        if !available.has(av1) {
+            eprintln!("{av1}: not in this ffmpeg");
+            continue;
+        }
+        let only = EncoderSet {
+            working: vec!["libx264".into(), "libx265".into(), av1.into()],
+            failed: Vec::new(),
+        };
+        let out_dir = dir.path().join(av1);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (plan, _) = export_project_using(
+            &t,
+            Project {
+                version: 1,
+                id: uuid::Uuid::new_v4(),
+                clips: vec![clip(&a, &[(0.7, 3.4)])],
+                export: ExportSettings {
+                    encoding: EncodingMode::Smart,
+                    output_dir: Some(out_dir),
+                    ..Default::default()
+                },
+                soundtrack: None,
+            },
+            &only,
+        );
+        assert!(has_copy(&plan));
+        let encoded: Vec<&str> = plan
+            .outputs
+            .iter()
+            .flat_map(|o| &o.segments)
+            .flat_map(|s| &s.pieces)
+            .filter_map(|p| match &p.kind {
+                PieceKind::Encode { enc, .. } => Some(enc.encoder.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !encoded.is_empty() && encoded.iter().all(|e| *e == av1),
+            "{encoded:?}"
+        );
+        tested += 1;
+    }
+    if tested == 0 {
+        eprintln!("skipped: neither SVT-AV1 nor libaom in this ffmpeg");
+    }
 }
