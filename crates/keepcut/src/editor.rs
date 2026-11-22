@@ -185,38 +185,60 @@ impl App {
 
     /// The segment list under the timeline: a table.
     fn segment_list(&mut self, ui: &mut egui::Ui) {
-        let Some(rows) = self.segment_rows() else { return };
+        let Some(rows) = self.segment_rows() else {
+            return;
+        };
         let mut act = SegActions::default();
-        egui::ScrollArea::vertical().max_height(130.0).auto_shrink([false, true]).show(ui, |ui| {
-            egui::Grid::new("segments").striped(true).num_columns(7).spacing([16.0, 2.0]).show(ui, |ui| {
-                for h in ["#", "Start", "End", "Duration", "Start frame", "Chapter title", ""] {
-                    ui.strong(h);
-                }
-                ui.end_row();
-                for (i, r) in rows.iter().enumerate() {
-                    let selected = self.selected_seg == Some(r.id);
-                    if ui.selectable_label(selected, format!("{}", i + 1)).clicked() {
-                        act.select = Some((r.id, r.start));
-                    }
-                    ui.monospace(timefmt::display(r.start));
-                    ui.monospace(timefmt::display(r.end));
-                    ui.monospace(timefmt::display(r.end - r.start));
-                    r.head.label(ui);
-                    r.title_edit(ui, 180.0, &mut act);
-                    r.remove_button(ui, &mut act);
-                    ui.end_row();
+        egui::ScrollArea::vertical()
+            .max_height(130.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                egui::Grid::new("segments")
+                    .striped(true)
+                    .num_columns(7)
+                    .spacing([16.0, 2.0])
+                    .show(ui, |ui| {
+                        for h in [
+                            "#",
+                            "Start",
+                            "End",
+                            "Duration",
+                            "Start frame",
+                            "Chapter title",
+                            "",
+                        ] {
+                            ui.strong(h);
+                        }
+                        ui.end_row();
+                        for (i, r) in rows.iter().enumerate() {
+                            let selected = self.selected_seg == Some(r.id);
+                            if ui
+                                .selectable_label(selected, format!("{}", i + 1))
+                                .clicked()
+                            {
+                                act.select = Some((r.id, r.start));
+                            }
+                            ui.monospace(timefmt::display(r.start));
+                            ui.monospace(timefmt::display(r.end));
+                            ui.monospace(timefmt::display(r.end - r.start));
+                            r.head.label(ui);
+                            r.title_edit(ui, 180.0, &mut act);
+                            r.remove_button(ui, &mut act);
+                            ui.end_row();
+                        }
+                    });
+                if rows.is_empty() {
+                    ui.weak(EMPTY_HINT);
                 }
             });
-            if rows.is_empty() {
-                ui.weak(EMPTY_HINT);
-            }
-        });
         self.apply_segment_actions(act);
     }
 
     /// The segment list beside a narrow video: one card per segment, filling the height.
     pub fn segment_cards(&mut self, ui: &mut egui::Ui) {
-        let Some(rows) = self.segment_rows() else { return };
+        let Some(rows) = self.segment_rows() else {
+            return;
+        };
         let mut act = SegActions::default();
         let kept: f64 = rows.iter().map(|r| r.end - r.start).sum();
         ui.horizontal(|ui| {
@@ -226,55 +248,63 @@ impl App {
             }
         });
         ui.add_space(4.0);
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for (i, r) in rows.iter().enumerate() {
-                let selected = self.selected_seg == Some(r.id);
-                let mut frame = egui::Frame::group(ui.style()).inner_margin(6.0);
-                if selected {
-                    let sel = ui.visuals().selection.bg_fill;
-                    frame = frame
-                        .fill(sel.gamma_multiply(0.2))
-                        .stroke(egui::Stroke::new(1.0, sel));
-                }
-                frame.show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        if ui.selectable_label(selected, format!("{}", i + 1)).clicked() {
-                            act.select = Some((r.id, r.start));
-                        }
-                        let times = egui::RichText::new(format!(
-                            "{} – {}",
-                            timefmt::display(r.start),
-                            timefmt::display(r.end)
-                        ))
-                        .monospace();
-                        if ui
-                            .add(egui::Label::new(times).sense(egui::Sense::click()))
-                            .on_hover_text("Go to the start of this segment")
-                            .clicked()
-                        {
-                            act.select = Some((r.id, r.start));
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            r.remove_button(ui, &mut act);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (i, r) in rows.iter().enumerate() {
+                    let selected = self.selected_seg == Some(r.id);
+                    let mut frame = egui::Frame::group(ui.style()).inner_margin(6.0);
+                    if selected {
+                        let sel = ui.visuals().selection.bg_fill;
+                        frame = frame
+                            .fill(sel.gamma_multiply(0.2))
+                            .stroke(egui::Stroke::new(1.0, sel));
+                    }
+                    frame.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(selected, format!("{}", i + 1))
+                                .clicked()
+                            {
+                                act.select = Some((r.id, r.start));
+                            }
+                            let times = egui::RichText::new(format!(
+                                "{} – {}",
+                                timefmt::display(r.start),
+                                timefmt::display(r.end)
+                            ))
+                            .monospace();
+                            if ui
+                                .add(egui::Label::new(times).sense(egui::Sense::click()))
+                                .on_hover_text("Go to the start of this segment")
+                                .clicked()
+                            {
+                                act.select = Some((r.id, r.start));
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    r.remove_button(ui, &mut act);
+                                },
+                            );
                         });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(timefmt::display(r.end - r.start)).monospace(),
+                            )
+                            .on_hover_text("Duration");
+                            ui.weak("·");
+                            r.head.label(ui);
+                        });
+                        r.title_edit(ui, f32::INFINITY, &mut act);
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(timefmt::display(r.end - r.start)).monospace(),
-                        )
-                        .on_hover_text("Duration");
-                        ui.weak("·");
-                        r.head.label(ui);
-                    });
-                    r.title_edit(ui, f32::INFINITY, &mut act);
-                });
-                ui.add_space(4.0);
-            }
-            if rows.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(EMPTY_HINT).weak()).wrap());
-            }
-        });
+                    ui.add_space(4.0);
+                }
+                if rows.is_empty() {
+                    ui.add(egui::Label::new(egui::RichText::new(EMPTY_HINT).weak()).wrap());
+                }
+            });
         self.apply_segment_actions(act);
     }
 

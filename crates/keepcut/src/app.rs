@@ -1209,19 +1209,20 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // which GPU draws (hybrid laptops: the integrated or the dedicated one)
                 if let Some(gpu) = &self.gpu {
-                    ui.weak(format!("GPU: {}", gpu.short_name())).on_hover_text(format!(
-                        "The GPU that draws Keepcut's window{}.\n{} ({}), OpenGL {}\n\n\
+                    ui.weak(format!("GPU: {}", gpu.short_name()))
+                        .on_hover_text(format!(
+                            "The GPU that draws Keepcut's window{}.\n{} ({}), OpenGL {}\n\n\
                          On a laptop with two GPUs, the graphics settings of Windows or \
                          of the GPU's driver choose which one Keepcut uses.",
-                        if self.render_kind == RenderKind::Gl {
-                            " and the video preview"
-                        } else {
-                            ""
-                        },
-                        gpu.renderer,
-                        gpu.vendor,
-                        gpu.version
-                    ));
+                            if self.render_kind == RenderKind::Gl {
+                                " and the video preview"
+                            } else {
+                                ""
+                            },
+                            gpu.renderer,
+                            gpu.vendor,
+                            gpu.version
+                        ));
                     ui.separator();
                 }
                 ui.weak(format!(
@@ -1576,8 +1577,7 @@ impl eframe::App for App {
                     let avail = ui.available_rect_before_wrap();
                     let w = (avail.height() * self.video_aspect()).min(avail.width());
                     let (video, side) = avail.split_left_right_at_x(avail.left() + w);
-                    ui.painter()
-                        .rect_filled(side, 0.0, ui.visuals().panel_fill);
+                    ui.painter().rect_filled(side, 0.0, ui.visuals().panel_fill);
                     ui.scope_builder(egui::UiBuilder::new().max_rect(video), |ui| {
                         self.video(ui, frame);
                     });
@@ -1637,15 +1637,15 @@ mod window_tests {
             }
             .short_name()
         };
-        assert_eq!(name("Intel(R) Iris(R) Xe Graphics"), "Intel Iris Xe Graphics");
+        assert_eq!(
+            name("Intel(R) Iris(R) Xe Graphics"),
+            "Intel Iris Xe Graphics"
+        );
         assert_eq!(
             name("NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2"),
             "NVIDIA GeForce RTX 4060 Laptop GPU"
         );
-        assert_eq!(
-            name("AMD Radeon(TM) Graphics"),
-            "AMD Radeon Graphics"
-        );
+        assert_eq!(name("AMD Radeon(TM) Graphics"), "AMD Radeon Graphics");
     }
 
     #[test]

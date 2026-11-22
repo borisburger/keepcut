@@ -164,7 +164,7 @@ impl App {
                 });
                 ui.end_row();
 
-                ui.label("Loudness target");
+                ui.label("Volume target");
                 ui.horizontal(|ui| {
                     if ui
                         .add(egui::DragValue::new(&mut self.config.loudness_target).range(-30.0..=-5.0).speed(0.1).fixed_decimals(1).suffix(" LUFS"))
@@ -173,7 +173,7 @@ impl App {
                         self.project.export.loudness_target = self.config.loudness_target;
                         self.mark_plan_dirty();
                     }
-                    ui.weak("default for loudness normalization (YouTube: −14)");
+                    ui.weak("default level for volume normalization (YouTube: −14)");
                 });
                 ui.end_row();
 
