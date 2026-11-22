@@ -111,6 +111,9 @@ pub struct App {
     status_at: Instant,
     /// A file dialog couldn't be shown (no xdg-desktop-portal); explain it.
     pub portal_notice: bool,
+    /// Size the window to the screen once the monitor size is known (first run only).
+    pub fit_window: bool,
+    fit_window_tries: u32,
     /// A fast frame step (speed 32) is in flight.
     fast_step: Option<Instant>,
     pending_seek: Option<f64>,
@@ -195,6 +198,8 @@ impl App {
             status: String::new(),
             status_at: Instant::now(),
             portal_notice: false,
+            fit_window: false,
+            fit_window_tries: 0,
             fast_step: None,
             pending_seek: None,
             seek_target: None,
@@ -1280,12 +1285,61 @@ impl App {
     }
 }
 
+/// Window size before the monitor is known, and for scripted runs.
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
+pub const MIN_WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
+
+/// First-run window size for a monitor of `monitor` points: 80% of it, at most 1600 × 1000.
+/// (The monitor size includes the taskbar/panels and the title bar isn't part of the inner size,
+/// so the full size would not fit.)
+fn first_window_size(monitor: egui::Vec2) -> egui::Vec2 {
+    (monitor * 0.8)
+        .min(egui::vec2(1600.0, 1000.0))
+        .max(egui::Vec2::from(MIN_WINDOW_SIZE))
+}
+
+impl App {
+    /// First run: resize the window to suit the monitor and center it. eframe only knows the
+    /// monitor once the window exists, and only limits the default size to the whole monitor.
+    fn fit_window_to_screen(&mut self, ctx: &egui::Context) {
+        if !self.fit_window {
+            return;
+        }
+        let (monitor, outer, inner) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.monitor_size, v.outer_rect, v.inner_rect)
+        });
+        let Some(monitor) = monitor.filter(|m| m.x > 1.0 && m.y > 1.0) else {
+            // not known yet; give up after a few frames rather than resize late
+            self.fit_window_tries += 1;
+            self.fit_window = self.fit_window_tries < 10;
+            return;
+        };
+        self.fit_window = false;
+        let size = first_window_size(monitor);
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        // centered on the primary monitor like eframe's `centered` (no positions on Wayland)
+        if let (Some(outer), Some(inner)) = (outer, inner) {
+            let frame = outer.size() - inner.size();
+            let pos = ((monitor - size - frame) * 0.5).max(egui::Vec2::ZERO);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.to_pos2()));
+        }
+        tracing::debug!("first run: window {size:?} for a {monitor:?} monitor");
+    }
+}
+
 fn is_project_file(p: &std::path::Path) -> bool {
     p.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case(keepcut_core::projfile::EXTENSION))
 }
 
 impl eframe::App for App {
+    /// Only the window geometry is kept between runs (main.rs), not egui's memory
+    /// (panel sizes, dialog positions): it could restore stale dialog state.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
         // a running export must not outlive the window (its ffmpeg would keep writing)
         self.cancel_export_and_wait();
@@ -1301,6 +1355,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.fit_window_to_screen(&ctx);
         while let Ok((path, r)) = self.probe.results.try_recv() {
             self.on_probed(path, r);
         }
@@ -1362,5 +1417,22 @@ impl eframe::App for App {
         if busy {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn first_window_fits_the_monitor() {
+        let size = |w, h| first_window_size(egui::vec2(w, h));
+        let near = |a: egui::Vec2, b: egui::Vec2| (a - b).length() < 0.01;
+        // 1920×1080 at 125 %: smaller than the old 1500×950 default
+        assert!(near(size(1536.0, 864.0), egui::vec2(1228.8, 691.2)));
+        // large monitors: capped
+        assert!(near(size(2560.0, 1440.0), egui::vec2(1600.0, 1000.0)));
+        // tiny monitors: never below the minimum window size
+        assert!(near(size(1024.0, 600.0), egui::vec2(900.0, 600.0)));
     }
 }

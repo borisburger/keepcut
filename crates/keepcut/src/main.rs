@@ -100,6 +100,15 @@ fn prefer_x11_under_wsl() -> bool {
     false
 }
 
+/// Where the window geometry is kept: it belongs to this machine (its monitors), so not in the
+/// roaming or synced config. Linux: `$XDG_STATE_HOME/keepcut` (~/.local/state/keepcut);
+/// Windows: `%LOCALAPPDATA%\Keepcut\data`; macOS: `~/Library/Application Support/Keepcut`.
+fn window_state_file() -> Option<PathBuf> {
+    let d = config::dirs()?;
+    let dir = d.state_dir().unwrap_or_else(|| d.data_local_dir());
+    Some(dir.join("window.ron"))
+}
+
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let x11_under_wsl = prefer_x11_under_wsl();
@@ -125,16 +134,29 @@ fn main() -> anyhow::Result<()> {
         }
     }
     tracing::info!("Keepcut {} starting", env!("CARGO_PKG_VERSION"));
+    // Window position, size and maximized state are kept by eframe in window.ron
+    // (window_state_file). Scripted test runs neither use nor change it: they point at a file
+    // that doesn't exist, and nothing is saved there (persist_window off, no egui memory).
+    let scripted = script.is_some();
+    let state_file = if scripted {
+        Some(std::env::temp_dir().join(format!("keepcut-script-{}.ron", std::process::id())))
+    } else {
+        window_state_file()
+    };
+    let has_saved_window = state_file.as_ref().is_some_and(|f| f.exists());
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("Keepcut")
-            .with_inner_size([1500.0, 950.0])
-            .with_min_inner_size([900.0, 600.0])
+            .with_inner_size(app::DEFAULT_WINDOW_SIZE)
+            .with_min_inner_size(app::MIN_WINDOW_SIZE)
             .with_drag_and_drop(true)
             .with_icon(app_icon())
             .with_app_id("io.github.borisburger.Keepcut"),
-        persist_window: false,
+        persist_window: !scripted,
+        persistence_path: state_file,
+        // eframe would center even a restored window
+        centered: !has_saved_window,
         ..Default::default()
     };
     eframe::run_native(
@@ -143,6 +165,8 @@ fn main() -> anyhow::Result<()> {
         Box::new(move |cc| {
             let mut app = app::App::new(cc, files)?;
             app.script = script;
+            // first run: size the window to the screen (later runs restore the saved geometry)
+            app.fit_window = !scripted && !has_saved_window;
             Ok(Box::new(app))
         }),
     )
