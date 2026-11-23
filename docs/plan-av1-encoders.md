@@ -6,8 +6,9 @@ format. The cut parts always use a **software** AV1 encoder (§6.3). Whole clips
 hardware encoder when one works (except screen recordings below 4K), else software too. Today not every package's ffmpeg has
 a software AV1 encoder. This plan fixes that and makes SVT-AV1 the preferred encoder.
 
-Not affected: H.264 and HEVC (nearly all footage), and full re-encodes, which offer
-only H.264 and HEVC as output codecs.
+Not affected: H.264 and HEVC sources (nearly all footage). Full re-encodes offered only
+H.264 and HEVC when this plan was written; AV1 output came after it (see "AV1 as a full
+re-encode codec").
 
 ## Status (2026-11-23)
 
