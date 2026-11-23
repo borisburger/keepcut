@@ -178,7 +178,9 @@ install -Dm644 "$bld/svt-av1/LICENSE.md" "$bld/svt-av1/PATENTS.md" -t "$appdir/u
 install -Dm644 "$bld/mpv/LICENSE.LGPL" "$appdir/usr/share/licenses/mpv/LICENSE.LGPL"
 
 # Smart cuts of AV1 clips need a software AV1 encoder (LD_LIBRARY_PATH finds $prefix/lib).
-if ! "$appdir/usr/bin/ffmpeg" -hide_banner -encoders | grep -q libsvtav1; then
+# Captured first: with pipefail, grep -q exiting early would kill ffmpeg with SIGPIPE.
+encoders=$("$appdir/usr/bin/ffmpeg" -hide_banner -encoders)
+if ! grep -q libsvtav1 <<<"$encoders"; then
   echo "the bundled ffmpeg has no libsvtav1 encoder" >&2
   exit 1
 fi

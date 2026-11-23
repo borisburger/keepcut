@@ -33,7 +33,9 @@ dylibbundler -od -b -cd \
   -p @executable_path/../Frameworks/
 
 # Smart cuts of AV1 clips need a software AV1 encoder; Homebrew's ffmpeg has SVT-AV1.
-if ! "$app/Contents/MacOS/ffmpeg" -hide_banner -encoders | grep -q libsvtav1; then
+# Captured first: with pipefail, grep -q exiting early would kill ffmpeg with SIGPIPE.
+encoders=$("$app/Contents/MacOS/ffmpeg" -hide_banner -encoders)
+if ! grep -q libsvtav1 <<<"$encoders"; then
   echo "the bundled ffmpeg has no libsvtav1 encoder" >&2
   exit 1
 fi
