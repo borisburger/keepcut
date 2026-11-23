@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "keepcut"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "keepcut-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "keepcut-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "keepcut-player"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "eframe",

@@ -12,7 +12,7 @@ re-encode codec").
 
 ## Status (2026-11-23)
 
-Implemented, not yet released:
+Implemented and released in 0.1.1:
 
 - Steps 1 and 4: the Flatpak and AppImage build SVT-AV1 4.3.0 (the version Homebrew
   pairs with ffmpeg 9) and ship its licence. Windows bundles BtbN's "win64-gpl-shared"
