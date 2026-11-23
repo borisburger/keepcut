@@ -284,6 +284,10 @@ pub struct VideoEncode {
     /// Keyframe interval in frames.
     pub gop: Option<u32>,
     pub tune: Option<String>,
+    /// Screen recording (or chosen as such): AV1's "Match source" settings differ, as
+    /// screen content keeps its quality at much higher CRF/CQ values than camera footage.
+    #[serde(default)]
+    pub screen: bool,
     /// Output frame size (the height selects faster presets at ≥ 2160p).
     #[serde(default)]
     pub width: u32,
@@ -390,16 +394,18 @@ impl VideoEncode {
                 }
             }
             ("libsvtav1", q) => {
-                // SVT-AV1 4.3 on two Bandicam AV1 4K recordings (SSIM vs the source, size
-                // relative to it): preset 6 crf 28 0.9994/0.9991 at 0.81/0.88x, crf 32
-                // 0.9993/0.9988 at 0.68/0.74x, 20-26 fps. Presets 8 and 10 were 2x faster
-                // but worse and larger (preset 8 crf 32: 0.9991/0.9986 at 0.85/0.93x).
-                // Cut parts get the higher quality: they sit between copied source frames.
+                // SVT-AV1 4.3, SSIM vs the source and size relative to it. Screen (two
+                // Bandicam AV1 4K recordings): preset 6 crf 32 0.9993/0.9988 at 0.68/0.74x,
+                // 20-26 fps. Camera (two 1080p phone clips, H.264 6 and 16 Mbit/s): crf 24
+                // 0.9902/0.9944 at 0.29/0.55x, like x265 crf 20 (0.9904/0.9942 at
+                // 0.34/0.60x); crf 32 drops to 0.9876/0.9928. Presets 8 and 10 were ~2x
+                // faster but worse and larger at the same crf. Cut parts (whose content type
+                // isn't known) get the camera value: they sit between copied source frames.
                 push(&mut a, "-preset", "6");
                 match q {
                     Quality::MatchSource => {
-                        let crf = if self.role == Role::Head { "28" } else { "32" };
-                        push(&mut a, "-crf", crf)
+                        let screen_long = self.screen && self.role == Role::Long;
+                        push(&mut a, "-crf", if screen_long { "32" } else { "24" })
                     }
                     Quality::Crf(c) => push(&mut a, "-crf", &c.to_string()),
                     Quality::BitrateKbps(b) => push(&mut a, "-b:v", &format!("{b}k")),
@@ -428,8 +434,11 @@ impl VideoEncode {
                     q => {
                         let cq = match q {
                             Quality::Crf(c) => *c,
-                            // av1_nvenc cq 36: SSIM 0.998 at 1.17x the source size (Bandicam AV1 4K)
-                            _ if av1 => 36,
+                            // av1_nvenc cq 36: SSIM 0.998 at 1.17x the source size (Bandicam AV1
+                            // 4K); camera cq 28: 0.9917/0.9951 at 0.50/0.93x, like hevc_nvenc
+                            // cq 21 (0.9922/0.9961 at 0.59/1.19x); cq 36 drops to 0.9863/0.9916
+                            _ if av1 && self.screen => 36,
+                            _ if av1 => 28,
                             _ if hevc => 21,
                             _ => 19,
                         };
@@ -451,10 +460,17 @@ impl VideoEncode {
                         push(&mut a, "-b:v", &format!("{b}k"));
                     }
                     q => {
-                        let qp = if let Quality::Crf(c) = q { *c } else { 18 };
+                        let qp = if av1 {
+                            av1_qindex(q, self.screen)
+                        } else if let Quality::Crf(c) = q {
+                            *c
+                        } else {
+                            18
+                        };
+                        let step = if av1 { 8 } else { 2 };
                         push(&mut a, "-rc", "cqp");
                         push(&mut a, "-qp_i", &qp.to_string());
-                        push(&mut a, "-qp_p", &(qp + 2).to_string());
+                        push(&mut a, "-qp_p", &(qp + step).min(255).to_string());
                     }
                 }
             }
@@ -471,7 +487,13 @@ impl VideoEncode {
             (_, q) if e.ends_with("_vaapi") => match q {
                 Quality::BitrateKbps(b) => push(&mut a, "-b:v", &format!("{b}k")),
                 q => {
-                    let qp = if let Quality::Crf(c) = q { *c } else { 20 };
+                    let qp = if av1 {
+                        av1_qindex(q, self.screen)
+                    } else if let Quality::Crf(c) = q {
+                        *c
+                    } else {
+                        20
+                    };
                     push(&mut a, "-rc_mode", "CQP");
                     push(&mut a, "-qp", &qp.to_string());
                 }
@@ -523,6 +545,18 @@ impl VideoEncode {
         }
         a
     }
+}
+
+/// AV1 quantizer (0–255) for AMF and VA-API, from a CRF-like value (0–63, as for SVT-AV1
+/// and NVENC). "Match source" uses SVT-AV1's whole-part values (not calibrated on these
+/// encoders: no AMD or VA-API AV1 hardware at hand).
+fn av1_qindex(q: &Quality, screen: bool) -> u32 {
+    let crf = match q {
+        Quality::Crf(c) => *c,
+        _ if screen => 32,
+        _ => 24,
+    };
+    (crf * 4).min(255)
 }
 
 #[cfg(test)]
@@ -595,16 +629,25 @@ mod tests {
             bframes: 0,
             gop: None,
             tune: None,
+            screen: false,
             width: 1920,
             height: 1080,
         };
         assert_eq!(
             v.args().join(" "),
-            "-c:v libsvtav1 -preset 6 -crf 28 -svtav1-params irefresh-type=2 -pix_fmt yuv420p -bf 0"
+            "-c:v libsvtav1 -preset 6 -crf 24 -svtav1-params irefresh-type=2 -pix_fmt yuv420p -bf 0"
         );
         v.role = Role::Long;
         v.height = 2160;
+        assert!(v.args().join(" ").contains("-preset 6 -crf 24 "));
+        v.screen = true;
         assert!(v.args().join(" ").contains("-preset 6 -crf 32 "));
+        v.encoder = "av1_nvenc".into();
+        assert!(v.args().join(" ").contains("-cq 36 "));
+        v.screen = false;
+        assert!(v.args().join(" ").contains("-cq 28 "));
+        v.encoder = "av1_amf".into();
+        assert!(v.args().join(" ").contains("-qp_i 96 -qp_p 104"));
     }
 
     #[test]
@@ -623,6 +666,7 @@ mod tests {
             bframes: 0,
             gop: None,
             tune: None,
+            screen: false,
             width: 1920,
             height: 1080,
         };

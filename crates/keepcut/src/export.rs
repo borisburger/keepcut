@@ -305,7 +305,7 @@ impl App {
                                     changed |= encoder_combo(ui, "smart-enc", &mut x.smart_encoder, codec, &self.encoders);
                                 });
                                 row(ui, "Quality", Some(tip), |ui| {
-                                    changed |= quality_ui(ui, "smart-q", &mut x.smart_quality);
+                                    changed |= quality_ui(ui, "smart-q", &mut x.smart_quality, codec);
                                 });
                                 ui.weak("Encoder and quality apply to clips that don't match the target format.");
                             }
@@ -974,8 +974,21 @@ fn encoder_combo(
 }
 
 /// Quality: match source / CRF-CQ value / bitrate. Returns "changed".
-fn quality_ui(ui: &mut egui::Ui, id: &str, q: &mut Quality) -> bool {
+fn quality_ui(ui: &mut egui::Ui, id: &str, q: &mut Quality, codec: VideoCodec) -> bool {
     let mut changed = false;
+    // AV1's CRF/CQ scale runs to 63, and the same picture needs higher numbers
+    let (crf_max, crf_default, crf_tip) = match codec {
+        VideoCodec::Av1 => (
+            63,
+            32,
+            "CRF (software) or CQ/QP (hardware): lower = better and larger; 24–40 is typical for AV1",
+        ),
+        _ => (
+            51,
+            23,
+            "CRF (software) or CQ/QP (hardware): lower = better and larger; 18–28 is typical",
+        ),
+    };
     ui.horizontal(|ui| {
         let shown = match q {
             Quality::MatchSource => "Match source",
@@ -995,11 +1008,11 @@ fn quality_ui(ui: &mut egui::Ui, id: &str, q: &mut Quality) -> bool {
                 }
                 if ui
                     .selectable_label(matches!(q, Quality::Crf(_)), "Constant quality")
-                    .on_hover_text("CRF (software) or CQ/QP (hardware): lower = better and larger; 18–28 is typical")
+                    .on_hover_text(crf_tip)
                     .clicked()
                     && !matches!(q, Quality::Crf(_))
                 {
-                    *q = Quality::Crf(23);
+                    *q = Quality::Crf(crf_default);
                 }
                 if ui
                     .selectable_label(matches!(q, Quality::BitrateKbps(_)), "Bitrate")
@@ -1013,7 +1026,10 @@ fn quality_ui(ui: &mut egui::Ui, id: &str, q: &mut Quality) -> bool {
             });
         match q {
             Quality::Crf(c) => {
-                changed |= ui.add(egui::DragValue::new(c).range(0..=51)).changed();
+                changed |= ui
+                    .add(egui::DragValue::new(c).range(0..=crf_max))
+                    .on_hover_text(crf_tip)
+                    .changed();
             }
             Quality::BitrateKbps(b) => {
                 changed |= ui
@@ -1043,13 +1059,21 @@ fn full_options(
                 .radio_value(&mut f.codec, VideoCodec::Hevc, "HEVC (H.265)")
                 .on_hover_text("About 30% smaller at the same quality; keeps 10-bit sources 10-bit")
                 .changed();
+            *changed |= ui
+                .radio_value(&mut f.codec, VideoCodec::Av1, "AV1")
+                .on_hover_text(
+                    "Smallest files; keeps 10-bit sources 10-bit. Older phones, TVs and computers \
+                     can't play it smoothly (hardware AV1 decoding arrived around 2020). \
+                     Without a hardware AV1 encoder, encoding is slow.",
+                )
+                .changed();
         });
     });
     row(ui, "Encoder", None, |ui| {
         *changed |= encoder_combo(ui, "full-enc", &mut f.encoder, f.codec, set);
     });
     row(ui, "Quality", None, |ui| {
-        *changed |= quality_ui(ui, "full-q", &mut f.quality);
+        *changed |= quality_ui(ui, "full-q", &mut f.quality, f.codec);
     });
     row(ui, "Size", None, |ui| {
         ui.horizontal(|ui| {

@@ -50,6 +50,32 @@ Hardware encoder detection was the same with both full builds. BtbN keeps month-
 builds long-term and daily builds only for a few weeks, so `fetch-ffmpeg.ps1` pins a
 month-end one.
 
+## AV1 as a full re-encode codec
+
+Offered since SVT-AV1 is in every package (dialog Codec "AV1", CLI `--codec av1`).
+"Match source" depends on the content type, because screen recordings keep their
+quality at much higher CRF/CQ values than camera footage. Camera calibration on two
+1080p phone clips (H.264, 6 and 16 Mbit/s), SSIM vs the source / size relative to it:
+
+| Encoder | Clip 1 | Clip 2 | fps |
+|---|---|---|---|
+| x265 crf 20 (HEVC "Match source") | 0.9904 / 0.34 | 0.9942 / 0.60 | 33–48 |
+| SVT-AV1 preset 6 crf 24 (chosen) | 0.9902 / 0.29 | 0.9944 / 0.55 | 58–69 |
+| SVT-AV1 preset 6 crf 32 (screen value) | 0.9876 / 0.16 | 0.9928 / 0.30 | 42–66 |
+| hevc_nvenc cq 21 | 0.9922 / 0.59 | 0.9961 / 1.19 | ~345 |
+| av1_nvenc cq 28 (chosen) | 0.9917 / 0.50 | 0.9951 / 0.93 | ~355 |
+| av1_nvenc cq 36 (screen value) | 0.9863 / 0.22 | 0.9916 / 0.41 | ~360 |
+
+So: SVT-AV1 crf 32 for screen content in whole parts, else 24 (cut parts too);
+av1_nvenc cq 36 for screen, 28 for camera. AMD AMF and VA-API take AV1 quantizers on a
+0–255 scale: the same values ×4, not calibrated (no such hardware at hand).
+
+Found on the way: NUT intermediates kept each source's time base, and the concat
+demuxer squashed the frames of a file whose time base differed from the first one's.
+That broke joins of AV1 clips with different time bases (full re-encodes keeping the
+original timing, and smart joins of different AV1 sources). NUT pieces now get a common
+90 kHz time base (`setts=time_base=1/90000`), as MPEG-TS pieces have.
+
 ## State at v0.1.0
 
 | Package | ffmpeg | Software AV1 encoders | AV1 smart cut |

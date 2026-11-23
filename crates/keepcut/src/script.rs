@@ -463,10 +463,10 @@ impl App {
                 }
             }
             "codec" => {
-                x.full.codec = if val == "hevc" {
-                    VideoCodec::Hevc
-                } else {
-                    VideoCodec::H264
+                x.full.codec = match val {
+                    "hevc" => VideoCodec::Hevc,
+                    "av1" => VideoCodec::Av1,
+                    _ => VideoCodec::H264,
                 }
             }
             "encoder" => x.full.encoder = enc(val),

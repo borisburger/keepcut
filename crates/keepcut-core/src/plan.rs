@@ -349,7 +349,19 @@ pub fn build(project: &Project, infos: &[MediaInfo], encoders: &EncoderSet) -> R
         let full = (s.encoding == EncodingMode::Full).then(|| {
             let r = video(ref_clip);
             let (w, h) = s.full.resolution.apply(r.width, r.height);
-            full_encode(&infos[ref_clip], r, project, encoders, w, h)
+            let mut enc = full_encode(&infos[ref_clip], r, project, encoders, w, h);
+            // no B-frames when any clip of the output is screen content, not only the
+            // reference: across a screen recording's long frame gaps they cut the MP4
+            // track end short (a camera + screen join lost up to 0.3 s, every encoder)
+            let screen = |ci: usize| match s.full.content {
+                ContentType::Screen => true,
+                ContentType::Camera => false,
+                ContentType::Auto => is_screen_content(&infos[ci], video(ci)),
+            };
+            if items.iter().any(|(ci, _, _)| screen(*ci)) {
+                enc.bframes = 0;
+            }
+            enc
         });
         // per-output reference stream: joined → target; separate → the clip itself
         for (ci, si, seg) in &items {
@@ -769,6 +781,7 @@ fn base_encode(
         bframes: if like.has_b_frames == 0 { 0 } else { 2 },
         gop: None,
         tune: None,
+        screen: false,
         width,
         height,
     }
@@ -797,13 +810,8 @@ fn mismatch_encode(
     encoders: &EncoderSet,
 ) -> VideoEncode {
     let codec = encoders::codec_of_name(&reference.codec_name).unwrap_or(VideoCodec::H264);
-    let enc = pick_encoder(
-        codec,
-        choice,
-        is_screen_content(info, src),
-        reference.height,
-        encoders,
-    );
+    let screen = is_screen_content(info, src);
+    let enc = pick_encoder(codec, choice, screen, reference.height, encoders);
     let mut ve = base_encode(
         &enc,
         Role::Long,
@@ -815,6 +823,7 @@ fn mismatch_encode(
     if !encoders::is_software(&enc) {
         ve.level = None;
     }
+    ve.screen = screen;
     ve
 }
 
@@ -886,6 +895,7 @@ fn full_encode(
         // keyframes are expensive (2 s GOPs measured +64% size on Bandicam footage)
         gop: Some(fps_for_gop * if screen { 10 } else { 2 }),
         tune: None,
+        screen,
         width: out_w,
         height: out_h,
     }
@@ -913,6 +923,7 @@ pub fn piece_cmd(
     dts_shift: f64,
 ) -> Cmd {
     let mut c = ffmpeg_base(tools);
+    let mut chain: Vec<String> = Vec::new();
     match &piece.kind {
         PieceKind::Copy {
             seek,
@@ -927,15 +938,12 @@ pub fn piece_cmd(
                 .arg(format!("0:{}", sp.video_stream))
                 .args(["-an", "-sn", "-dn", "-c", "copy"]);
             c = c.arg("-frames:v").arg(packets.to_string());
-            let mut chain: Vec<String> = bsf.iter().cloned().collect();
+            chain.extend(bsf.iter().cloned());
             if *drop_leading > 0 {
                 chain.push(format!(r"noise=drop=gte(n\,1)*lte(n\,{drop_leading})"));
             }
             if dts_shift > 1e-7 {
                 chain.push(setts_shift(dts_shift));
-            }
-            if !chain.is_empty() {
-                c = c.arg("-bsf:v").arg(chain.join(","));
             }
             c = c.args(["-avoid_negative_ts", "make_zero"]);
         }
@@ -973,8 +981,20 @@ pub fn piece_cmd(
             c = c.args(enc.args());
         }
     }
+    // NUT keeps each source's time base (1/15000, 1/60000, …), and the concat demuxer
+    // squashes the packets of a file whose time base differs from the first one's into
+    // microseconds. One time base for every piece, as MPEG-TS has: 90 kHz.
+    if format == "nut" {
+        chain.push(NUT_TIME_BASE.into());
+    }
+    if !chain.is_empty() {
+        c = c.arg("-bsf:v").arg(chain.join(","));
+    }
     c.arg("-f").arg(format).arg(out)
 }
+
+/// Bitstream filter giving a NUT intermediate the common 90 kHz time base.
+const NUT_TIME_BASE: &str = "setts=time_base=1/90000";
 
 /// `setts` filter lowering DTS by `secs` (PTS unchanged).
 pub fn setts_shift(secs: f64) -> String {

@@ -126,6 +126,7 @@ enum ChaptersArg {
 enum Codec {
     H264,
     Hevc,
+    Av1,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -332,6 +333,7 @@ fn load(
         x.full.codec = match c {
             Codec::H264 => VideoCodec::H264,
             Codec::Hevc => VideoCodec::Hevc,
+            Codec::Av1 => VideoCodec::Av1,
         };
     }
     if let Some(e) = &ov.encoder {

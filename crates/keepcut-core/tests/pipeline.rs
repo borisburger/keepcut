@@ -216,6 +216,221 @@ fn full_hevc_10bit_downscale_constant_fps() {
     assert_eq!(m.frames.len(), 7 * 25, "constant 25 fps over 7 s");
 }
 
+/// Full re-encode to AV1 with the preferred software AV1 encoder: 10-bit kept, scaled,
+/// constant frame rate, 2 s keyframe interval (camera content), B-frames requested.
+#[test]
+fn full_av1_10bit_downscale_constant_fps() {
+    let Some(t) = tools() else { return };
+    let set = software_encoders(&t);
+    if !set.has(set.software(VideoCodec::Av1)) {
+        eprintln!("skipping: no software AV1 encoder in this ffmpeg");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hevc10 = make_clip(
+        &t,
+        dir.path(),
+        "hevc10.mp4",
+        SRC_360,
+        &[
+            "-t",
+            "6",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-x265-params",
+            "log-level=error",
+            "-c:a",
+            "aac",
+        ],
+    );
+    let small43 = make_clip(
+        &t,
+        dir.path(),
+        "small43.mp4",
+        &["-f", "lavfi", "-i", "testsrc2=s=320x240:r=15"],
+        &["-t", "4", "-c:v", "libx264", "-preset", "ultrafast"],
+    );
+    let mut s = ExportSettings {
+        encoding: EncodingMode::Full,
+        output_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    s.full.codec = VideoCodec::Av1;
+    s.full.resolution = Resolution::ShortSide(240);
+    s.full.fps = Some(25);
+    let (plan, paths) = export_with(
+        &t,
+        vec![clip(&hevc10, &[(0.5, 5.5)]), clip(&small43, &[(1.0, 3.0)])],
+        s,
+    );
+    assert_eq!(plan.outputs.len(), 1);
+    let m = probe::probe(&t, &paths[0], None, None).unwrap();
+    let v = m.video.unwrap();
+    assert_eq!(
+        (v.codec_name.as_str(), v.width, v.height),
+        ("av1", 426, 240)
+    );
+    assert_eq!(v.pix_fmt, "yuv420p10le");
+    assert_eq!(m.frames.frames.len(), 7 * 25, "constant 25 fps over 7 s");
+    // every 2 s (50 frames) at most; joined pieces each start with a keyframe
+    let keys: Vec<f64> = m
+        .frames
+        .frames
+        .iter()
+        .filter(|f| f.key)
+        .map(|f| f.t)
+        .collect();
+    assert!(keys.len() >= 4, "keyframes at {keys:?}");
+    assert!(
+        keys.windows(2).all(|w| w[1] - w[0] <= 2.0 + 1e-3),
+        "keyframes at {keys:?}"
+    );
+}
+
+/// AV1 pieces go through NUT intermediates, which keep each source's time base; joining
+/// clips whose time bases differ (15 and 25 fps here, source frame timing kept) must keep
+/// every frame's time (the concat demuxer squashed the second file's frames before NUT
+/// pieces got a common 90 kHz time base).
+#[test]
+fn full_av1_joins_clips_with_different_time_bases() {
+    let Some(t) = tools() else { return };
+    let set = software_encoders(&t);
+    if !set.has(set.software(VideoCodec::Av1)) {
+        eprintln!("skipping: no software AV1 encoder in this ffmpeg");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let x264 = ["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac"];
+    let a = make_clip(
+        &t,
+        dir.path(),
+        "a15.mp4",
+        SRC_360,
+        &[&["-t", "4"], &x264[..]].concat(),
+    );
+    let b = make_clip(
+        &t,
+        dir.path(),
+        "b25.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=640x360:r=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440",
+        ],
+        &[&["-t", "3"], &x264[..]].concat(),
+    );
+    let mut s = ExportSettings {
+        encoding: EncodingMode::Full,
+        output_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    s.full.codec = VideoCodec::Av1;
+    let (_, paths) = export_with(
+        &t,
+        vec![clip(&a, &[(0.0, 4.0)]), clip(&b, &[(0.0, 3.0)])],
+        s,
+    );
+    let m = probe::probe(&t, &paths[0], None, None).unwrap();
+    assert_eq!(m.video.unwrap().codec_name, "av1");
+    assert_eq!(m.frames.frames.len(), 4 * 15 + 3 * 25);
+    // the 25 fps part starts at 4 s and keeps its 40 ms frame spacing
+    let ts: Vec<f64> = m.frames.frames.iter().map(|f| f.t).collect();
+    let i = ts.iter().position(|&x| x > 4.0 - 1e-3).unwrap();
+    assert!(
+        (ts[i] - 4.0).abs() < 0.002,
+        "second clip starts at {}",
+        ts[i]
+    );
+    assert!(
+        (ts[i + 10] - ts[i] - 0.4).abs() < 0.002,
+        "{:?}",
+        &ts[i..i + 11]
+    );
+}
+
+/// A full re-encode joining camera footage (the reference: B-frames) and a screen
+/// recording with long frame gaps: the B-frames setting must not cut the end of the
+/// track short (it did with every encoder while only the reference clip decided).
+#[test]
+fn full_join_of_camera_and_gappy_screen_clip() {
+    let Some(t) = tools() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let camera = make_clip(
+        &t,
+        dir.path(),
+        "camera.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=640x360:r=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=440:r=48000",
+        ],
+        &[
+            "-t",
+            "6",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-bf",
+            "2",
+            "-c:a",
+            "aac",
+        ],
+    );
+    // 15 fps with frames 5–13 of every 15 dropped: gaps of 0.67 s, as screen recorders
+    // write when nothing changes (detected as screen content: average rate ≠ 15); with
+    // B-frames the output came out 0.6 s short
+    let screen = make_clip(
+        &t,
+        dir.path(),
+        "screen.mp4",
+        SRC_360,
+        &[
+            "-t",
+            "4",
+            "-vf",
+            "select='not(between(mod(n\\,15)\\,5\\,13))'",
+            "-fps_mode",
+            "vfr",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-c:a",
+            "aac",
+        ],
+    );
+    let s = ExportSettings {
+        encoding: EncodingMode::Full,
+        output_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    // export_with asserts that verification passed (duration, A/V sync, frame times)
+    let (plan, _) = export_with(
+        &t,
+        vec![clip(&camera, &[(0.0, 6.0)]), clip(&screen, &[(0.0, 4.0)])],
+        s,
+    );
+    let PieceKind::Encode { enc, .. } = &plan.outputs[0].segments[1].pieces[0].kind else {
+        panic!("full re-encode expected");
+    };
+    assert_eq!(enc.bframes, 0);
+}
+
 #[test]
 fn per_clip_and_per_segment_outputs() {
     let Some(t) = tools() else { return };
